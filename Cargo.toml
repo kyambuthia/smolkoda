@@ -1,0 +1,20 @@
+[package]
+name = "smolkoda"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny agentic coding harness with pluggable providers"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+regex = "1"
+glob = "0.3"
+rpassword = "7"
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
