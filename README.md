@@ -10,7 +10,7 @@ cargo build --release
 ./target/release/smolkoda
 ```
 
-No Python, no runtime, no SDKs. The only network dependency is the provider you
+No interpreter or SDKs. The only network dependency is the provider you
 configure.
 
 ## Architecture
@@ -141,6 +141,5 @@ Env overrides: `SMOLKODA_PROVIDER`, `SMOLKODA_MODEL`, `SMOLKODA_BASE_URL`,
 - The harness uses native tool calling. The model/provider must support it.
 - Tools run with your user's permissions: `bash` can execute anything and `write`/`edit` can change any file you can. Use a container or VM for untrusted repositories.
 - API keys are stored as plaintext unless you use `env:NAME` or `${NAME}`. The config file is written with mode `0600`.
-- `prototype/smolkoda.py` is the original single-file Python prototype; the Rust binary is the main implementation.
 - The project is intentionally small. Read the modules in order:
   `feed` → `router` → `looper`.
