@@ -1,9 +1,13 @@
 [package]
 name = "smolkoda"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Tiny agentic coding harness with pluggable providers"
 license = "MIT"
+repository = "https://github.com/kyambuthia/smolkoda"
+readme = "README.md"
+keywords = ["agent", "coding-agent", "llm", "cli", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

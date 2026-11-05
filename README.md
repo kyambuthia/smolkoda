@@ -13,6 +13,15 @@ cargo build --release
 No interpreter or SDKs. The only network dependency is the provider you
 configure.
 
+## Install
+
+Install the 0.0.1 release from crates.io:
+
+```bash
+cargo install smolkoda --version 0.0.1
+smolkoda --setup
+```
+
 ## Architecture
 
 Three named pieces do the work:
