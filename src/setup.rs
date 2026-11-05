@@ -25,7 +25,7 @@ pub fn setup_wizard(
 
     println!("\n{}smolkoda provider setup{}", ui::bold(), ui::reset());
     println!(
-        "{}Pick a preset or configure any compatible endpoint.{}",
+        "{}Choose a provider, paste its API key, then select a model.{}",
         ui::dim(),
         ui::reset()
     );
@@ -86,7 +86,7 @@ pub fn setup_wizard(
         let key = if auth == Auth::None {
             String::new()
         } else {
-            match ask_secret("API key (or env:VAR)", None) {
+            match ask_secret("Paste API key (hidden; or env:VAR)", None) {
                 Some(value) => value,
                 None => return Ok(false),
             }
@@ -144,10 +144,7 @@ pub fn setup_wizard(
                 ui::reset()
             );
         }
-        let base_url = match ask("Base URL", Some(preset.base_url)) {
-            Some(value) if !value.is_empty() => value,
-            _ => return Ok(false),
-        };
+        let base_url = preset.base_url.to_string();
         let key = if preset.auth == Auth::None {
             println!("{}No API key needed.{}", ui::dim(), ui::reset());
             String::new()
@@ -160,7 +157,7 @@ pub fn setup_wizard(
             );
             key_ref
         } else {
-            match ask_secret("API key (or env:VAR)", None) {
+            match ask_secret("Paste API key (hidden; or env:VAR)", None) {
                 Some(value) => value,
                 None => return Ok(false),
             }
@@ -170,7 +167,17 @@ pub fn setup_wizard(
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        let available_models = discover_models(&base_url, preset.auth, &key, &model_headers);
+        let available_models = discover_models(&base_url, preset.auth, &key, &model_headers)
+            .filter(|models| !models.is_empty())
+            .or_else(|| {
+                (!preset.models.is_empty()).then(|| {
+                    preset
+                        .models
+                        .iter()
+                        .map(|model| (*model).to_string())
+                        .collect()
+                })
+            });
         let model = match ask_model(Some(preset.default_model), available_models.as_deref()) {
             Some(value) if !value.is_empty() => value,
             _ => return Ok(false),
@@ -193,9 +200,14 @@ pub fn setup_wizard(
         )
     };
 
-    let name = match ask("Profile name", Some(&default_name)) {
-        Some(value) if !value.is_empty() => value,
-        _ => return Ok(false),
+    let is_preset = preset_id.is_some();
+    let name = if is_preset {
+        default_name
+    } else {
+        match ask("Profile name", Some(&default_name)) {
+            Some(value) if !value.is_empty() => value,
+            _ => return Ok(false),
+        }
     };
     if config.providers.contains_key(&name) {
         let confirm = ask(
@@ -247,6 +259,8 @@ pub fn setup_wizard(
     let missing_key = auth != Auth::None && config::resolve_secret(&key).is_empty();
     if missing_key {
         ui::warn("No API key found; set it before chatting.");
+    } else if is_preset {
+        println!("Run `smolkoda --test` to verify the connection.");
     } else if matches!(
         ask("Test connection now? (Y/n)", Some("y")).as_deref(),
         Some("y") | Some("Y") | Some("yes")

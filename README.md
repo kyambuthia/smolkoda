@@ -43,7 +43,10 @@ Supporting modules:
 ## Provider setup
 
 Run `smolkoda --setup` and pick a preset or choose **custom** for any endpoint
-that speaks OpenAI Chat Completions or Anthropic Messages.
+that speaks OpenAI Chat Completions or Anthropic Messages. Preset setup is a
+short flow: choose a provider, paste its API key when needed (the input stays
+hidden), then select a model. Presets fill in the endpoint automatically. If a
+provider's model list cannot be loaded, smolkoda offers its suggested models.
 
 Built-in presets:
 
