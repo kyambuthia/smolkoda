@@ -36,7 +36,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install aarch64 Linux cross compiler
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
@@ -46,7 +51,12 @@ jobs:
           cp "target/${{ matrix.target }}/release/smolkoda${{ matrix.ext }}" "dist/$name/"
           cp README.md CHANGELOG.md "dist/$name/"
           (cd dist && tar -czf "$name.tar.gz" "$name")
-          (cd dist && zip -r "$name.zip" "$name")
+          if command -v zip >/dev/null 2>&1; then
+            (cd dist && zip -r "$name.zip" "$name")
+          else
+            dist="$(pwd -W)/dist"
+            powershell.exe -NoProfile -Command "Compress-Archive -Path '$dist/$name' -DestinationPath '$dist/$name.zip'"
+          fi
           ls -R dist
       - uses: actions/upload-artifact@v4
         with:
