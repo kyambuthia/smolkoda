@@ -404,3 +404,101 @@ fn preview_text(text: &str, limit: usize) -> String {
 fn preview_json(value: &Value) -> String {
     preview_text(&value.to_string(), 500)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn router() -> Router {
+        Router::new(vec![Settings {
+            name: "test".to_string(),
+            protocol: Protocol::OpenAi,
+            base_url: "https://example.com/v1".to_string(),
+            model: "model".to_string(),
+            api_key: String::new(),
+            auth: Auth::None,
+            headers: Vec::new(),
+            max_tokens: 8192,
+            max_tokens_param: "max_tokens".to_string(),
+            temperature: None,
+            timeout: Duration::from_secs(30),
+            fallbacks: Vec::new(),
+        }])
+    }
+
+    #[test]
+    fn parses_anthropic_text_and_tool_use() {
+        let data = json!({
+            "content": [
+                {"type": "text", "text": "working"},
+                {"type": "tool_use", "id": "tool_1", "name": "read", "input": {"path": "a.rs"}}
+            ]
+        });
+        let blocks = router().parse_anthropic(&data).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], Block::Text(text) if text == "working"));
+        assert!(matches!(
+            &blocks[1],
+            Block::ToolUse { id, name, parse_error: None, .. }
+                if id == "tool_1" && name == "read"
+        ));
+    }
+
+    #[test]
+    fn parses_openai_text_and_reports_invalid_arguments() {
+        let data = json!({
+            "choices": [{
+                "message": {
+                    "content": [{"type": "text", "text": "working"}],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {"name": "read", "arguments": "not json"}
+                    }]
+                }
+            }]
+        });
+        let blocks = router().parse_openai(&data).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], Block::Text(text) if text == "working"));
+        assert!(matches!(
+            &blocks[1],
+            Block::ToolUse { id, parse_error: Some(error), .. }
+                if id == "call_1" && error.contains("invalid JSON")
+        ));
+    }
+
+    #[test]
+    fn missing_response_shape_is_an_error() {
+        let error = router().parse_anthropic(&json!({})).unwrap_err();
+        assert!(error.contains("unexpected response"));
+        let error = router().parse_openai(&json!({"choices": []})).unwrap_err();
+        assert!(error.contains("unexpected response"));
+    }
+
+    #[test]
+    fn non_object_tool_input_is_rejected() {
+        let (input, error) = normalize_input(json!(["path"]));
+        assert_eq!(input, json!({}));
+        assert!(error.unwrap().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn retryable_errors_include_rate_limits_and_transport_failures() {
+        assert!(is_retryable("HTTP 429: slow down"));
+        assert!(is_retryable("HTTP 503: unavailable"));
+        assert!(is_retryable("connection failed: refused"));
+        assert!(is_retryable("request timed out"));
+        assert!(!is_retryable("HTTP 400: bad request"));
+        assert!(!is_retryable("invalid JSON from provider"));
+    }
+
+    #[test]
+    fn provider_error_bodies_are_condensed() {
+        assert_eq!(
+            extract_error(r#"{"error": {"message": "bad key"}}"#),
+            "bad key"
+        );
+        assert_eq!(extract_error(r#"{"message": "bad model"}"#), "bad model");
+        assert_eq!(extract_error("plain failure"), "plain failure");
+    }
+}

@@ -381,3 +381,119 @@ pub fn endpoint(settings: &Settings) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local_config() -> Config {
+        Config {
+            active: None,
+            providers: [(
+                "local".to_string(),
+                Profile {
+                    protocol: Some("openai".to_string()),
+                    base_url: Some("http://localhost:11434/v1".to_string()),
+                    model: Some("qwen3:8b".to_string()),
+                    api_key: Some(String::new()),
+                    auth: Some("none".to_string()),
+                    ..Profile::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn settings(protocol: Protocol, base_url: &str) -> Settings {
+        Settings {
+            name: "test".to_string(),
+            protocol,
+            base_url: base_url.to_string(),
+            model: "model".to_string(),
+            api_key: String::new(),
+            auth: Auth::None,
+            headers: Vec::new(),
+            max_tokens: 8192,
+            max_tokens_param: "max_tokens".to_string(),
+            temperature: None,
+            timeout: Duration::from_secs(30),
+            fallbacks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn custom_profile_uses_defaults() {
+        let settings = build_settings("local", &local_config(), &Overrides::default()).unwrap();
+        assert_eq!(settings.name, "local");
+        assert_eq!(settings.protocol, Protocol::OpenAi);
+        assert_eq!(settings.auth, Auth::None);
+        assert_eq!(settings.max_tokens, 8192);
+        assert_eq!(settings.timeout, Duration::from_secs(180));
+        assert_eq!(settings.max_tokens_param, "max_tokens");
+    }
+
+    #[test]
+    fn invalid_protocol_and_missing_base_url_are_reported() {
+        let mut config = local_config();
+        let error = build_settings(
+            "local",
+            &config,
+            &Overrides {
+                protocol: Some("grpc".to_string()),
+                ..Overrides::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid protocol"));
+
+        config.providers.get_mut("local").unwrap().base_url = None;
+        let error = build_settings("local", &config, &Overrides::default()).unwrap_err();
+        assert!(error.contains("no base URL"));
+    }
+
+    #[test]
+    fn unknown_provider_lists_known_names() {
+        let error =
+            build_settings("missing", &Config::default(), &Overrides::default()).unwrap_err();
+        assert!(error.contains("unknown provider 'missing'"));
+        assert!(error.contains("anthropic"));
+    }
+
+    #[test]
+    fn endpoint_appends_once() {
+        assert_eq!(
+            endpoint(&settings(Protocol::OpenAi, "https://example.com/v1/")),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint(&settings(
+                Protocol::OpenAi,
+                "https://example.com/v1/chat/completions"
+            )),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint(&settings(Protocol::Anthropic, "https://example.com/v1")),
+            "https://example.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn secrets_resolve_and_mask() {
+        let name = format!("SMOLKODA_TEST_SECRET_{}", std::process::id());
+        std::env::set_var(&name, "secret-value");
+        assert_eq!(resolve_secret(&format!("env:{name}")), "secret-value");
+        assert_eq!(resolve_secret(&format!("${{{name}}}")), "secret-value");
+        assert_eq!(resolve_secret("literal"), "literal");
+        std::env::remove_var(&name);
+
+        assert_eq!(mask_secret(""), "(none)");
+        assert_eq!(mask_secret("short"), "***");
+        assert_eq!(
+            mask_secret("env:OPENROUTER_API_KEY"),
+            "env:OPENROUTER_API_KEY"
+        );
+        assert_eq!(mask_secret("1234567890"), "1234...7890");
+    }
+}

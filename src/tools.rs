@@ -427,3 +427,105 @@ fn truncate(text: &str) -> String {
     let kept: String = text.chars().take(MAX_TOOL_CHARS).collect();
     format!("{kept}\n... truncated")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "smolkoda-test-{}-{}-{name}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_edit_and_read_file_tools() {
+        let dir = temp_dir("edit");
+        let path = dir.join("nested").join("file.txt");
+        let path = path.to_string_lossy().to_string();
+
+        run("write", &json!({"path": path, "content": "alpha\nbeta\n"})).unwrap();
+        let lines = run("read", &json!({"path": path, "offset": 2, "limit": 1})).unwrap();
+        assert!(lines.contains("2| beta"));
+
+        run(
+            "edit",
+            &json!({"path": path, "old": "beta", "new": "gamma"}),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "alpha\ngamma\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_requires_a_unique_match_unless_all_is_set() {
+        let dir = temp_dir("edit-all");
+        let path = dir.join("file.txt");
+        let path_string = path.to_string_lossy().to_string();
+        fs::write(&path, "x x").unwrap();
+
+        let error = run(
+            "edit",
+            &json!({"path": path_string, "old": "x", "new": "y"}),
+        )
+        .unwrap_err();
+        assert!(error.contains("appears 2 times"));
+
+        run(
+            "edit",
+            &json!({"path": path_string, "old": "x", "new": "y", "all": true}),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "y y");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn glob_and_grep_find_files() {
+        let dir = temp_dir("search");
+        fs::write(dir.join("a.txt"), "needle\nhaystack\n").unwrap();
+        fs::write(dir.join("ignored.txt"), "needle\n").unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(dir.join("target").join("built.txt"), "needle\n").unwrap();
+
+        let results = run(
+            "glob",
+            &json!({"pat": "*.txt", "path": dir.to_string_lossy()}),
+        )
+        .unwrap();
+        assert!(results.contains("a.txt"));
+
+        let hits = run(
+            "grep",
+            &json!({"pat": "needle", "path": dir.to_string_lossy()}),
+        )
+        .unwrap();
+        assert!(hits.contains("a.txt:1:needle"));
+        assert!(!hits.contains("built.txt"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_arguments_and_large_output_are_handled() {
+        assert!(run("read", &json!({}))
+            .unwrap_err()
+            .contains("missing string"));
+
+        let text = "a".repeat(MAX_TOOL_CHARS + 10);
+        let output = truncate(&text);
+        assert!(output.ends_with("\n... truncated"));
+        assert_eq!(
+            output.chars().count(),
+            MAX_TOOL_CHARS + "\n... truncated".len()
+        );
+    }
+}

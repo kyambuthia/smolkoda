@@ -17,10 +17,10 @@ configure.
 
 Prebuilt binaries for Linux (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x86_64) are available on the [releases page](https://github.com/kyambuthia/smolkoda/releases).
 
-Or install with Cargo:
+Or install from the repository with Cargo (crates.io publishing is not available yet):
 
 ```bash
-cargo install smolkoda --version 0.1.0
+cargo install --git https://github.com/kyambuthia/smolkoda --locked
 smolkoda --setup
 ```
 
@@ -41,6 +41,7 @@ Supporting modules:
 - `src/tools.rs` — `read`, `write`, `edit`, `glob`, `grep`, `bash`.
 - `src/setup.rs` — interactive provider wizard.
 - `src/ui.rs` — terminal output.
+- `src/voice.rs` — `/voice` recording, transcription, and speech playback.
 
 ## Provider setup
 
@@ -169,3 +170,19 @@ Env overrides: `SMOLKODA_PROVIDER`, `SMOLKODA_MODEL`, `SMOLKODA_BASE_URL`,
 - API keys are stored as plaintext unless you use `env:NAME` or `${NAME}`. The config file is written with mode `0600`.
 - The project is intentionally small. Read the modules in order:
   `feed` → `router` → `looper`.
+
+## Development
+
+Requirements: Rust 1.88 or newer (`rust-version` in `Cargo.toml`) and, on Linux
+arm64 releases, `gcc-aarch64-linux-gnu` for cross-compiling.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked --all-targets
+```
+
+CI runs the same checks on every push and pull request, plus a Rust 1.88 MSRV
+check. See `CONTRIBUTING.md` for the full workflow and `SECURITY.md` for
+reporting vulnerabilities. Release builds run on `v*` tags; the tag drives the
+archive and release names.
