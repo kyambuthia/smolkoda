@@ -24,6 +24,11 @@ impl Looper {
 
     /// Run one user turn. The feed is committed only if the turn succeeds.
     pub fn run_turn(&mut self, input: &str) -> Result<(), String> {
+        self.run_turn_with_output(input).map(|_| ())
+    }
+
+    /// Run one user turn and return the final assistant text for voice playback.
+    pub fn run_turn_with_output(&mut self, input: &str) -> Result<String, String> {
         let mut working = self.feed.clone();
         working.push_user(input);
         let system = system_prompt();
@@ -34,14 +39,18 @@ impl Looper {
                 ui::print_text("(empty response)");
                 working.push_assistant(vec![Block::Text("(empty response)".to_string())]);
                 self.feed = working;
-                return Ok(());
+                return Ok(String::new());
             }
             working.push_assistant(blocks.clone());
 
             let mut results = Vec::new();
+            let mut step_text = Vec::new();
             for block in &blocks {
                 match block {
-                    Block::Text(text) => ui::print_text(text),
+                    Block::Text(text) => {
+                        ui::print_text(text);
+                        step_text.push(text.as_str());
+                    }
                     Block::ToolUse {
                         id,
                         name,
@@ -67,7 +76,7 @@ impl Looper {
 
             if results.is_empty() {
                 self.feed = working;
-                return Ok(());
+                return Ok(step_text.join("\n"));
             }
             working.push_tool_results(results);
         }

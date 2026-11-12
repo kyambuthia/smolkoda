@@ -65,7 +65,8 @@ you can still enter a model ID manually.
 RunInfra's preset uses `https://api.runinfra.ai/v1` and reads
 `RUNINFRA_GATEWAY_KEY` (or `RUNINFRA_API_KEY`). Its Anthropic-compatible
 Messages endpoint is the same base URL; use protocol `anthropic` if you prefer
-that wire format.
+that wire format. RunInfra recommends a larger output budget for reasoning
+models; add `"max_tokens": 16384` to the profile if replies get cut off.
 
 ### Custom endpoints
 
@@ -119,8 +120,19 @@ and `fallbacks` (profile names tried in order for retryable failures).
 - `/config` — show the active route
 - `/feed` or `/timeline` — show the feed timeline
 - `/tools` — list tools
-- `/c` — clear the conversation
-- `/q` or `exit` — quit
+- `/voice [seconds]` — record a spoken prompt and speak the reply (default: 8 seconds)
+- `/clear` — clear the conversation
+- `/quit` — quit
+
+Voice mode waits for Enter before recording, then uses OpenRouter's Whisper
+Large V3 Turbo for transcription and Fish Audio Drama 3 for speech output. It
+needs an OpenRouter API key (the
+`OPENROUTER_API_KEY` environment variable or a saved `openrouter` profile) and
+the `ffmpeg` and `ffplay` commands available locally.
+On Linux it tries PulseAudio and then ALSA for microphone capture. Set
+`SMOLKODA_AUDIO_INPUT` to an ffmpeg input such as `alsa:hw:1,0` to choose a
+different device. `SMOLKODA_FFMPEG` and `SMOLKODA_FFPLAY` can override the
+command names.
 
 ## CLI
 

@@ -89,7 +89,7 @@ pub fn banner(model: &str, provider: &str, endpoint: &str) {
         reset()
     );
     println!("{}{}{}", dim(), endpoint, reset());
-    println!("{}/help for commands, /q to quit{}\n", dim(), reset());
+    println!("{}/help for commands, /quit to quit{}\n", dim(), reset());
 }
 
 pub fn print_text(text: &str) {

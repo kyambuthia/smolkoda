@@ -6,6 +6,7 @@ mod router;
 mod setup;
 mod tools;
 mod ui;
+mod voice;
 
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -218,10 +219,10 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if line.is_empty() {
             continue;
         }
-        if matches!(line, "/q" | "/quit" | "exit" | "quit") {
+        if line == "/quit" {
             break;
         }
-        if line == "/c" {
+        if line == "/clear" {
             looper.clear();
             ui::info("Conversation cleared.");
             continue;
@@ -241,6 +242,24 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if line == "/tools" {
             for spec in tools::SPECS {
                 println!("  {:<6} {}", spec.name, spec.description);
+            }
+            continue;
+        }
+        if line == "/voice" || line.starts_with("/voice ") {
+            let argument = line.strip_prefix("/voice").unwrap_or("").trim();
+            let seconds = if argument.is_empty() {
+                voice::DEFAULT_RECORD_SECONDS
+            } else {
+                match argument.parse::<u64>() {
+                    Ok(seconds @ 1..=60) => seconds,
+                    _ => {
+                        ui::warn("Usage: /voice [seconds] (choose 1 to 60)");
+                        continue;
+                    }
+                }
+            };
+            if let Err(err) = voice::run(looper, config, seconds) {
+                ui::error(&err);
             }
             continue;
         }
@@ -430,8 +449,9 @@ fn print_help() {
     println!("  /config           show active route");
     println!("  /feed, /timeline  show the feed timeline");
     println!("  /tools            list tools");
-    println!("  /c                clear conversation");
-    println!("  /q, exit          quit");
+    println!("  /voice [seconds]  record a prompt and speak the reply");
+    println!("  /clear            clear conversation");
+    println!("  /quit             quit");
 }
 
 fn print_usage() {
