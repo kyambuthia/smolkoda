@@ -15,10 +15,12 @@ configure.
 
 ## Install
 
-Install the 0.0.1 release from crates.io:
+Prebuilt binaries for Linux (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x86_64) are available on the [releases page](https://github.com/kyambuthia/smolkoda/releases).
+
+Or install with Cargo:
 
 ```bash
-cargo install smolkoda --version 0.0.1
+cargo install smolkoda --version 0.1.0
 smolkoda --setup
 ```
 

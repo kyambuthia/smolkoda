@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0
+
+- Voice mode: `/voice [seconds]` records a spoken prompt, transcribes it (OpenRouter Whisper), runs the agent turn, and speaks the reply (Fish Audio).
+
 ## 0.0.1
 
 Initial release of smolkoda as a Rust command-line coding harness.
