@@ -120,7 +120,7 @@ and `fallbacks` (profile names tried in order for retryable failures).
 
 ## Commands
 
-- `/provider [name]` — list or switch providers (opens setup if a key is missing)
+- `/provider [name]` — open a scrollable provider picker or switch by name (opens setup if a key is missing)
 - `/model [name]` — show or set the model
 - `/models` — fetch and list models available from the active provider
 - `/config` — show the active route

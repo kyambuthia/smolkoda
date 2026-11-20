@@ -266,10 +266,23 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if let Some(rest) = line.strip_prefix("/provider") {
             let argument = rest.trim();
             let target = if argument.is_empty() {
-                print_providers(path, config);
-                match setup::ask("Switch to (blank to cancel)", None) {
-                    Some(value) => value,
-                    None => continue,
+                if ui::can_select() {
+                    let current = looper.router.primary().name.clone();
+                    let (items, targets) = switch_provider_items(config, &current);
+                    let initial = targets
+                        .iter()
+                        .position(|target| target == &current)
+                        .unwrap_or(0);
+                    match ui::select("Switch provider", &items, initial) {
+                        Some(index) => targets[index].clone(),
+                        None => continue,
+                    }
+                } else {
+                    print_providers(path, config);
+                    match setup::ask("Switch to (blank to cancel)", None) {
+                        Some(value) => value,
+                        None => continue,
+                    }
                 }
             } else {
                 argument.to_string()
@@ -360,6 +373,40 @@ fn switch_provider(name: &str, config: &mut Config, path: &Path) -> Result<Setti
     Ok(settings)
 }
 
+fn switch_provider_items(config: &Config, current: &str) -> (Vec<String>, Vec<String>) {
+    let mut items = Vec::new();
+    let mut targets = Vec::new();
+
+    for preset in PRESETS {
+        if config.providers.contains_key(preset.id) {
+            continue;
+        }
+        let marker = if preset.id == current { "*" } else { " " };
+        items.push(format!(
+            "{} {:<11} {:<9} {}",
+            marker,
+            preset.id,
+            preset.protocol.as_str(),
+            preset.label
+        ));
+        targets.push(preset.id.to_string());
+    }
+
+    for (name, profile) in &config.providers {
+        let marker = if name.as_str() == current { "*" } else { " " };
+        items.push(format!(
+            "{} {:<11} {:<12} {}",
+            marker,
+            name,
+            profile.preset.as_deref().unwrap_or("custom"),
+            profile.model.as_deref().unwrap_or("?")
+        ));
+        targets.push(name.clone());
+    }
+
+    (items, targets)
+}
+
 fn print_providers(path: &Path, config: &Config) {
     println!("{}Provider presets{}", ui::bold(), ui::reset());
     for preset in PRESETS {
@@ -443,7 +490,7 @@ fn print_feed(feed: &Feed) {
 
 fn print_help() {
     println!("{}Commands{}", ui::bold(), ui::reset());
-    println!("  /provider [name]  list or switch provider");
+    println!("  /provider [name]  open provider picker or switch");
     println!("  /model [name]     show or set model");
     println!("  /models           fetch available models from provider");
     println!("  /config           show active route");
