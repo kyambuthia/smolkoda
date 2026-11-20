@@ -298,17 +298,14 @@ pub fn prompt() {
 pub fn banner(model: &str, provider: &str, _endpoint: &str) {
     let dot = if is_utf8_locale() { "·" } else { "-" };
     println!(
-        "{}smolkoda{} {}v{} {} {} {} {}{}",
+        "{}smolkoda{} {}v{}{}",
         bold(),
         reset(),
         dim(),
         env!("CARGO_PKG_VERSION"),
-        dot,
-        model,
-        dot,
-        provider,
         reset()
     );
+    println!("{}{} {} {}{}", dim(), model, dot, provider, reset());
     println!(
         "{}/help {} /model {} /cost {} /quit{}\n",
         dim(),
