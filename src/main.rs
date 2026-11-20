@@ -11,7 +11,7 @@ mod voice;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 
-use config::{Config, Overrides, Settings};
+use config::{Config, Overrides, Profile, Settings};
 use feed::{Block, Feed};
 use looper::Looper;
 use presets::{Auth, PRESETS};
@@ -373,10 +373,13 @@ fn switch_provider(name: &str, config: &mut Config, path: &Path) -> Result<Setti
 fn set_model(looper: &mut Looper, config: &mut Config, path: &Path, model: &str) {
     looper.router.primary_mut().model = model.to_string();
     let name = looper.router.primary().name.clone();
-    let profile = config.providers.entry(name.clone()).or_default();
-    if presets::find(&name).is_some() && profile.preset.is_none() {
-        profile.preset = Some(name.clone());
-    }
+    let profile = config.providers.entry(name.clone()).or_insert_with(|| {
+        let mut profile = Profile::default();
+        if presets::find(&name).is_some() {
+            profile.preset = Some(name.clone());
+        }
+        profile
+    });
     profile.model = Some(model.to_string());
     config.active = Some(name);
     if let Err(err) = config::save_config(path, config) {
@@ -541,10 +544,17 @@ fn print_usage() {
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(mut iter: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args::default();
-    let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--" => {
+                args.prompt.extend(iter);
+                break;
+            }
             "--setup" => args.setup = true,
             "--list-providers" => args.list_providers = true,
             "--test" => args.test = true,
@@ -611,4 +621,61 @@ fn parse_args() -> Result<Args, String> {
 
 fn next_value(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     iter.next().ok_or_else(|| format!("{flag} needs a value"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_args_supports_end_of_options_marker() {
+        let args = parse_args_from(
+            ["--provider", "openai", "--", "--not-a-flag", "hello"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(args.provider.as_deref(), Some("openai"));
+        assert_eq!(args.prompt, vec!["--not-a-flag", "hello"]);
+    }
+
+    #[test]
+    fn set_model_preserves_custom_profile_without_preset() {
+        let dir = std::env::temp_dir().join(format!("smolkoda-main-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let mut config = Config::default();
+        config.providers.insert(
+            "openai".to_string(),
+            Profile {
+                base_url: Some("http://localhost:8080/v1".to_string()),
+                model: Some("local-a".to_string()),
+                ..Profile::default()
+            },
+        );
+        let settings = Settings {
+            name: "openai".to_string(),
+            protocol: presets::Protocol::OpenAi,
+            base_url: "http://localhost:8080/v1".to_string(),
+            model: "local-a".to_string(),
+            api_key: String::new(),
+            auth: Auth::None,
+            headers: Vec::new(),
+            max_tokens: 8192,
+            max_tokens_param: "max_tokens".to_string(),
+            temperature: None,
+            timeout: Duration::from_secs(30),
+            fallbacks: Vec::new(),
+        };
+        let mut looper = Looper::new(Router::new(vec![settings]));
+
+        set_model(&mut looper, &mut config, &path, "local-b");
+        let saved = config.providers.get("openai").unwrap();
+        assert_eq!(saved.preset, None);
+        assert_eq!(saved.model.as_deref(), Some("local-b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
