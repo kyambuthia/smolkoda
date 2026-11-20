@@ -308,7 +308,9 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if line == "/model" || line.starts_with("/model ") {
             let argument = line.strip_prefix("/model").unwrap_or("").trim();
             if argument.is_empty() {
-                match looper.router.available_models() {
+                match ui::busy(ui::AnimKind::Fetch, "fetching models", || {
+                    looper.router.available_models()
+                }) {
                     Ok(models) if models.is_empty() => {
                         ui::info("No models returned by the provider.");
                     }

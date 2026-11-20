@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::feed::{Block, Feed, ToolResult};
 use crate::router::Router;
 use crate::tools;
@@ -35,7 +37,9 @@ impl Looper {
         let system = system_prompt();
 
         for _step in 1..=self.max_steps {
-            let blocks = self.router.complete(&working, &system, None)?;
+            let blocks = ui::busy(ui::AnimKind::Think, "thinking", || {
+                self.router.complete(&working, &system, None)
+            })?;
             if blocks.is_empty() {
                 ui::print_text("(empty response)");
                 working.push_assistant(vec![Block::Text("(empty response)".to_string())]);
@@ -60,14 +64,20 @@ impl Looper {
                         parse_error,
                     } => {
                         ui::print_tool(name, input);
+                        let started = Instant::now();
                         let result = match parse_error {
                             Some(err) => format!("error: {err}"),
-                            None => match tools::run(name, input) {
-                                Ok(output) => output,
-                                Err(err) => format!("error: {err}"),
-                            },
+                            None => {
+                                let label = format!("running {name}");
+                                match ui::busy(ui::AnimKind::Tool, &label, || {
+                                    tools::run(name, input)
+                                }) {
+                                    Ok(output) => output,
+                                    Err(err) => format!("error: {err}"),
+                                }
+                            }
                         };
-                        ui::print_result(&result);
+                        ui::print_result(&result, started.elapsed());
                         results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content: result,

@@ -52,8 +52,10 @@ pub fn run(looper: &mut Looper, config: &Config, seconds: u64) -> Result<(), Str
     }
 
     ui::info("Generating speech with Fish Audio Drama...");
-    let audio = synthesize(&agent, &api_key, &speech_text)?;
-    play_audio(&audio)
+    let audio = ui::busy(ui::AnimKind::Voice, "synthesizing speech", || {
+        synthesize(&agent, &api_key, &speech_text)
+    })?;
+    ui::busy(ui::AnimKind::Voice, "speaking", || play_audio(&audio))
 }
 
 fn openrouter_api_key(looper: &Looper, config: &Config) -> Result<String, String> {

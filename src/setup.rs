@@ -319,7 +319,9 @@ fn discover_models(
         ui::warn("No API key available; skipping model discovery.");
         return None;
     }
-    match crate::router::fetch_models(base_url, auth, &api_key, headers, Duration::from_secs(30)) {
+    match ui::busy(ui::AnimKind::Fetch, "fetching models", || {
+        crate::router::fetch_models(base_url, auth, &api_key, headers, Duration::from_secs(30))
+    }) {
         Ok(models) => {
             let priced = models
                 .iter()
