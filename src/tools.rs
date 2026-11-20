@@ -168,7 +168,7 @@ fn read(args: &Value) -> Result<String, String> {
             lines.len()
         ));
     }
-    let end = (offset - 1 + limit).min(lines.len());
+    let end = (offset - 1).saturating_add(limit).min(lines.len());
     let width = end.to_string().len();
     let mut output = String::new();
     for (index, line) in lines[offset - 1..end].iter().enumerate() {
@@ -369,6 +369,16 @@ fn bash(args: &Value) -> Result<String, String> {
     let mut truncated = false;
     let mut timed_out = false;
 
+    let mut push_line = |line: String| {
+        if size < MAX_TOOL_CHARS {
+            size += line.len();
+            println!("  | {line}");
+            chunks.push(line);
+        } else {
+            truncated = true;
+        }
+    };
+
     loop {
         let now = Instant::now();
         if now >= deadline {
@@ -377,28 +387,9 @@ fn bash(args: &Value) -> Result<String, String> {
             break;
         }
         match receiver.recv_timeout((deadline - now).min(Duration::from_millis(100))) {
-            Ok(line) => {
-                if size < MAX_TOOL_CHARS {
-                    size += line.len();
-                    println!("  | {line}");
-                    chunks.push(line);
-                } else {
-                    truncated = true;
-                }
-            }
+            Ok(line) => push_line(line),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Ok(Some(_)) = child.try_wait() {
-                    let _ = stdout_thread.join();
-                    let _ = stderr_thread.join();
-                    for line in receiver.try_iter() {
-                        if size < MAX_TOOL_CHARS {
-                            size += line.len();
-                            println!("  | {line}");
-                            chunks.push(line);
-                        } else {
-                            truncated = true;
-                        }
-                    }
                     break;
                 }
             }
@@ -406,10 +397,19 @@ fn bash(args: &Value) -> Result<String, String> {
         }
     }
 
-    let _ = child.wait();
+    let status = child.wait().ok();
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    for line in receiver.try_iter() {
+        push_line(line);
+    }
+
     let mut output = chunks.join("\n");
     if timed_out {
         output.push_str(&format!("\n(timed out after {timeout}s)"));
+    } else if let Some(code) = status.and_then(|s| (!s.success()).then(|| s.code())) {
+        let detail = code.map_or_else(|| "signal".to_string(), |n| n.to_string());
+        output.push_str(&format!("\n(exit code {detail})"));
     }
     if truncated {
         output.push_str("\n(output truncated)");
@@ -527,5 +527,23 @@ mod tests {
             output.chars().count(),
             MAX_TOOL_CHARS + "\n... truncated".len()
         );
+    }
+
+    #[test]
+    fn read_handles_large_limit_and_bash_reports_exit_code() {
+        let dir = temp_dir("read-bash");
+        let path = dir.join("file.txt");
+        fs::write(&path, "one\ntwo\n").unwrap();
+
+        let text = run(
+            "read",
+            &json!({"path": path.to_string_lossy(), "offset": 2, "limit": u64::MAX}),
+        )
+        .unwrap();
+        assert_eq!(text, "2| two");
+
+        let output = run("bash", &json!({"cmd": "exit 7"})).unwrap();
+        assert!(output.contains("(exit code 7)"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
