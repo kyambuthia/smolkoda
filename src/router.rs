@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -473,7 +474,85 @@ pub fn fetch_models(
     let data: Value = response
         .into_json()
         .map_err(|err| format!("invalid model-list JSON from provider: {err}"))?;
-    parse_model_list(&data)
+    let mut models = parse_model_list(&data)?;
+    if !is_local_url(base_url)
+        && !base_url
+            .trim_end_matches('/')
+            .starts_with("https://openrouter.ai")
+        && models.iter().any(|model| model.pricing.is_none())
+    {
+        enrich_pricing_from_public_catalog(&mut models);
+    }
+    Ok(models)
+}
+
+pub fn enrich_pricing_from_public_catalog(models: &mut [ModelInfo]) {
+    if models.iter().all(|model| model.pricing.is_some()) {
+        return;
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(5))
+        .build();
+    let Ok(response) = agent
+        .get("https://openrouter.ai/api/v1/models")
+        .set("accept", "application/json")
+        .call()
+    else {
+        return;
+    };
+    let Ok(data) = response.into_json::<Value>() else {
+        return;
+    };
+    if let Ok(catalog) = parse_model_list(&data) {
+        enrich_models_from_catalog(models, &catalog);
+    }
+}
+
+pub fn enrich_models_from_catalog(models: &mut [ModelInfo], catalog: &[ModelInfo]) {
+    let mut exact: HashMap<&str, ModelPricing> = HashMap::new();
+    let mut normalized: HashMap<String, ModelPricing> = HashMap::new();
+    for entry in catalog {
+        let Some(pricing) = entry.pricing else {
+            continue;
+        };
+        exact.entry(entry.id.as_str()).or_insert(pricing);
+        let short = entry
+            .id
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(entry.id.as_str());
+        exact.entry(short).or_insert(pricing);
+        normalized
+            .entry(normalize_model_key(short))
+            .or_insert(pricing);
+    }
+    for model in models {
+        if model.pricing.is_some() {
+            continue;
+        }
+        let short = model
+            .id
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(model.id.as_str());
+        model.pricing = exact
+            .get(model.id.as_str())
+            .copied()
+            .or_else(|| exact.get(short).copied())
+            .or_else(|| normalized.get(&normalize_model_key(short)).copied());
+    }
+}
+
+fn normalize_model_key(id: &str) -> String {
+    id.to_ascii_lowercase().replace('.', "-")
+}
+
+pub fn is_local_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    lower.contains("://localhost")
+        || lower.contains("://127.0.0.1")
+        || lower.contains("://[::1]")
+        || lower.contains("://0.0.0.0")
 }
 
 pub fn parse_model_list(data: &Value) -> Result<Vec<ModelInfo>, String> {
@@ -767,5 +846,54 @@ mod tests {
         assert_eq!(usage.output_tokens, 50);
         assert!(usage.has_reported_cost);
         assert!((usage.reported_cost_usd - 0.0015).abs() < 1e-9);
+    }
+
+    #[test]
+    fn enriches_missing_pricing_from_catalog() {
+        let catalog = vec![
+            ModelInfo {
+                id: "anthropic/claude-sonnet-4.5".to_string(),
+                pricing: Some(ModelPricing {
+                    input_per_million: 3.0,
+                    output_per_million: 15.0,
+                }),
+            },
+            ModelInfo {
+                id: "deepseek/deepseek-chat".to_string(),
+                pricing: Some(ModelPricing {
+                    input_per_million: 0.27,
+                    output_per_million: 1.1,
+                }),
+            },
+        ];
+        let existing_override = ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+        };
+        let mut models = vec![
+            ModelInfo {
+                id: "claude-sonnet-4-5".to_string(),
+                pricing: None,
+            },
+            ModelInfo {
+                id: "deepseek-chat".to_string(),
+                pricing: Some(existing_override),
+            },
+            ModelInfo {
+                id: "unknown-local".to_string(),
+                pricing: None,
+            },
+        ];
+        enrich_models_from_catalog(&mut models, &catalog);
+        assert_eq!(models[0].pricing, catalog[0].pricing);
+        assert_eq!(models[1].pricing, Some(existing_override));
+        assert_eq!(models[2].pricing, None);
+    }
+
+    #[test]
+    fn detects_local_urls() {
+        assert!(is_local_url("http://localhost:11434/v1"));
+        assert!(is_local_url("http://127.0.0.1:8080/v1"));
+        assert!(!is_local_url("https://api.openai.com/v1"));
     }
 }

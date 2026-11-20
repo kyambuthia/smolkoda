@@ -177,14 +177,18 @@ pub fn setup_wizard(
             .filter(|models| !models.is_empty())
             .or_else(|| {
                 (!preset.models.is_empty()).then(|| {
-                    preset
+                    let mut models: Vec<ModelInfo> = preset
                         .models
                         .iter()
                         .map(|model| ModelInfo {
                             id: (*model).to_string(),
                             pricing: None,
                         })
-                        .collect()
+                        .collect();
+                    if !crate::router::is_local_url(&base_url) {
+                        crate::router::enrich_pricing_from_public_catalog(&mut models);
+                    }
+                    models
                 })
             });
         let model = match ask_model(Some(preset.default_model), available_models.as_deref()) {
@@ -317,12 +321,26 @@ fn discover_models(
     }
     match crate::router::fetch_models(base_url, auth, &api_key, headers, Duration::from_secs(30)) {
         Ok(models) => {
-            println!(
-                "{}Loaded {} models from provider.{}",
-                ui::green(),
-                models.len(),
-                ui::reset()
-            );
+            let priced = models
+                .iter()
+                .filter(|model| model.pricing.is_some())
+                .count();
+            if priced > 0 {
+                println!(
+                    "{}Loaded {} models from provider ({} with pricing).{}",
+                    ui::green(),
+                    models.len(),
+                    priced,
+                    ui::reset()
+                );
+            } else {
+                println!(
+                    "{}Loaded {} models from provider.{}",
+                    ui::green(),
+                    models.len(),
+                    ui::reset()
+                );
+            }
             Some(models)
         }
         Err(err) => {
