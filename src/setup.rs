@@ -31,36 +31,43 @@ pub fn setup_wizard(
     );
     println!("{}Config: {}{}\n", ui::dim(), path.display(), ui::reset());
 
-    for (index, preset) in PRESETS.iter().enumerate() {
-        let active = if config.active.as_deref() == Some(preset.id) {
-            format!(" {}*{}", ui::green(), ui::reset())
-        } else {
-            String::new()
-        };
-        println!(
-            "  {:2}. {:<11} {}{}",
-            index + 1,
-            preset.id,
-            preset.label,
-            active
-        );
-    }
-    println!(
-        "   0. {:<11} Any OpenAI- or Anthropic-compatible endpoint",
-        "custom"
-    );
-
-    let default_choice = preferred_id
+    let items = provider_items(config);
+    let active_index = config.active.as_deref().and_then(|name| {
+        let preset = config
+            .providers
+            .get(name)
+            .and_then(|profile| profile.preset.as_deref())
+            .unwrap_or(name);
+        PRESETS.iter().position(|candidate| candidate.id == preset)
+    });
+    let default_index = preferred_id
         .and_then(|id| PRESETS.iter().position(|preset| preset.id == id))
         .or_else(|| {
             PRESETS
                 .iter()
                 .position(|preset| presets::default_key_ref(Some(preset)).is_some())
         })
-        .map(|index| (index + 1).to_string());
-    let choice = match ask("Provider", default_choice.as_deref()) {
-        Some(choice) => choice,
-        None => return Ok(false),
+        .or(active_index)
+        .unwrap_or(0);
+    let choice = if ui::can_select() {
+        match ui::select("Choose a provider", &items, default_index) {
+            Some(index) if index == PRESETS.len() => "0".to_string(),
+            Some(index) => (index + 1).to_string(),
+            None => return Ok(false),
+        }
+    } else {
+        for (index, item) in items.iter().enumerate() {
+            if index == PRESETS.len() {
+                println!("   0. {item}");
+            } else {
+                println!("  {:2}. {item}", index + 1);
+            }
+        }
+        let default_choice = (default_index + 1).to_string();
+        match ask("Provider", Some(&default_choice)) {
+            Some(choice) => choice,
+            None => return Ok(false),
+        }
     };
 
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
@@ -270,6 +277,31 @@ pub fn setup_wizard(
     Ok(true)
 }
 
+fn provider_items(config: &Config) -> Vec<String> {
+    let mut items: Vec<String> = PRESETS
+        .iter()
+        .map(|preset| {
+            let active = if config.active.as_deref() == Some(preset.id) {
+                " *"
+            } else {
+                ""
+            };
+            format!(
+                "{:<11} {:<9} {}{}",
+                preset.id,
+                preset.protocol.as_str(),
+                preset.label,
+                active
+            )
+        })
+        .collect();
+    items.push(format!(
+        "{:<11} {:<9} {}",
+        "custom", "compatible", "Any OpenAI- or Anthropic-compatible endpoint"
+    ));
+    items
+}
+
 fn discover_models(
     base_url: &str,
     auth: Auth,
@@ -303,9 +335,14 @@ fn ask_model(default: Option<&str>, models: Option<&[String]>) -> Option<String>
     let Some(models) = models.filter(|models| !models.is_empty()) else {
         return ask("Model", default);
     };
-    let suggested = default
-        .filter(|model| models.iter().any(|candidate| candidate == model))
-        .or_else(|| models.first().map(String::as_str));
+    let suggested_index = default
+        .and_then(|model| models.iter().position(|candidate| candidate == model))
+        .unwrap_or(0);
+    if ui::can_select() {
+        return ui::select("Choose a model", models, suggested_index)
+            .map(|index| models[index].clone());
+    }
+    let suggested = models.get(suggested_index).map(String::as_str);
     println!("\n{}Available models{}", ui::bold(), ui::reset());
     for (index, model) in models.iter().enumerate() {
         let marker = if Some(model.as_str()) == suggested {

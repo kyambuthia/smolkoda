@@ -50,6 +50,9 @@ that speaks OpenAI Chat Completions or Anthropic Messages. Preset setup is a
 short flow: choose a provider, paste its API key when needed (the input stays
 hidden), then select a model. Presets fill in the endpoint automatically. If a
 provider's model list cannot be loaded, smolkoda offers its suggested models.
+Provider and model lists use an interactive terminal picker: Up/Down scroll,
+PageUp/PageDown move by a page, Home/End jump to either edge, Enter selects,
+and Esc cancels. Non-interactive shells keep the numbered prompt fallback.
 
 Built-in presets:
 
