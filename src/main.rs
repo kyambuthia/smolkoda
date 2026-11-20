@@ -305,44 +305,41 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
             }
             continue;
         }
-        if line == "/models" {
-            match looper.router.available_models() {
-                Ok(models) => {
-                    let current = looper.router.primary().model.as_str();
-                    println!(
-                        "{}Models available from provider{}",
-                        ui::bold(),
-                        ui::reset()
-                    );
-                    for model in models {
-                        let marker = if model == current { "*" } else { " " };
-                        println!("  {} {}", marker, model);
-                    }
-                    println!("Set one with: /model MODEL_ID");
-                }
-                Err(err) => ui::error(&format!("could not load provider models: {err}")),
-            }
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("/model") {
-            let argument = rest.trim();
+        if line == "/model" || line.starts_with("/model ") {
+            let argument = line.strip_prefix("/model").unwrap_or("").trim();
             if argument.is_empty() {
-                println!("model: {}", looper.router.primary().model);
+                match looper.router.available_models() {
+                    Ok(models) if models.is_empty() => {
+                        ui::info("No models returned by the provider.");
+                    }
+                    Ok(models) => {
+                        let current = looper.router.primary().model.clone();
+                        let selected = models
+                            .iter()
+                            .position(|model| model == &current)
+                            .unwrap_or(0);
+                        if ui::can_select() {
+                            if let Some(index) = ui::select("Choose a model", &models, selected) {
+                                set_model(looper, config, path, &models[index]);
+                            }
+                        } else {
+                            println!(
+                                "{}Models available from provider{}",
+                                ui::bold(),
+                                ui::reset()
+                            );
+                            for model in &models {
+                                let marker = if model == &current { "*" } else { " " };
+                                println!("  {} {}", marker, model);
+                            }
+                            println!("Set one with: /model MODEL_ID");
+                        }
+                    }
+                    Err(err) => ui::error(&format!("could not load provider models: {err}")),
+                }
                 continue;
             }
-            looper.router.primary_mut().model = argument.to_string();
-            let name = looper.router.primary().name.clone();
-            let profile = config.providers.entry(name.clone()).or_default();
-            if presets::find(&name).is_some() && profile.preset.is_none() {
-                profile.preset = Some(name.clone());
-            }
-            profile.model = Some(argument.to_string());
-            config.active = Some(name);
-            if let Err(err) = config::save_config(path, config) {
-                ui::error(&err);
-            } else {
-                println!("{}Model set to {}{}", ui::green(), argument, ui::reset());
-            }
+            set_model(looper, config, path, argument);
             continue;
         }
         if line.starts_with('/') {
@@ -371,6 +368,22 @@ fn switch_provider(name: &str, config: &mut Config, path: &Path) -> Result<Setti
     config.active = Some(settings.name.clone());
     config::save_config(path, config)?;
     Ok(settings)
+}
+
+fn set_model(looper: &mut Looper, config: &mut Config, path: &Path, model: &str) {
+    looper.router.primary_mut().model = model.to_string();
+    let name = looper.router.primary().name.clone();
+    let profile = config.providers.entry(name.clone()).or_default();
+    if presets::find(&name).is_some() && profile.preset.is_none() {
+        profile.preset = Some(name.clone());
+    }
+    profile.model = Some(model.to_string());
+    config.active = Some(name);
+    if let Err(err) = config::save_config(path, config) {
+        ui::error(&err);
+    } else {
+        println!("{}Model set to {}{}", ui::green(), model, ui::reset());
+    }
 }
 
 fn switch_provider_items(config: &Config, current: &str) -> (Vec<String>, Vec<String>) {
@@ -491,8 +504,7 @@ fn print_feed(feed: &Feed) {
 fn print_help() {
     println!("{}Commands{}", ui::bold(), ui::reset());
     println!("  /provider [name]  open provider picker or switch");
-    println!("  /model [name]     show or set model");
-    println!("  /models           fetch available models from provider");
+    println!("  /model [name]     choose a model or set its ID");
     println!("  /config           show active route");
     println!("  /feed, /timeline  show the feed timeline");
     println!("  /tools            list tools");

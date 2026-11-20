@@ -6,6 +6,7 @@
 - Add contributor, security, and agent guidance plus build/test documentation.
 - Add tests for provider configuration, response parsing, and file tools.
 - Add scrollable terminal pickers for provider and model selection.
+- Consolidate model selection under `/model`; the separate `/models` command is removed.
 - Fix the documented install command to use the Git repository until the crate is published.
 
 ## 0.1.0
