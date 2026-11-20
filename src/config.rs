@@ -182,11 +182,7 @@ pub fn pick_provider(config: &Config, requested: Option<&str>) -> String {
     }
     for id in presets::AUTO_ORDER {
         if let Some(preset) = presets::find(id) {
-            if preset
-                .env
-                .iter()
-                .any(|name| std::env::var_os(name).is_some())
-            {
+            if preset.env.iter().any(|name| env_nonempty(name).is_some()) {
                 return (*id).to_string();
             }
         }
@@ -495,5 +491,17 @@ mod tests {
             "env:OPENROUTER_API_KEY"
         );
         assert_eq!(mask_secret("1234567890"), "1234...7890");
+    }
+
+    #[test]
+    fn empty_env_var_does_not_provide_default_key_ref() {
+        let env_name = "ANTHROPIC_API_KEY";
+        let previous = std::env::var_os(env_name);
+        std::env::set_var(env_name, "");
+        assert_eq!(presets::default_key_ref(presets::find("anthropic")), None);
+        match previous {
+            Some(value) => std::env::set_var(env_name, value),
+            None => std::env::remove_var(env_name),
+        }
     }
 }

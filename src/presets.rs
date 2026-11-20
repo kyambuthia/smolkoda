@@ -365,7 +365,7 @@ pub fn default_key_ref(preset: Option<&Preset>) -> Option<String> {
         preset
             .env
             .iter()
-            .find(|name| std::env::var_os(name).is_some())
+            .find(|name| crate::config::env_nonempty(name).is_some())
             .map(|name| format!("env:{name}"))
     })
 }
