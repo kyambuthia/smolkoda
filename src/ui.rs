@@ -10,6 +10,8 @@ use crossterm::{
 };
 use serde_json::Value;
 
+use crate::router::{format_usd, CostTier, ModelInfo};
+
 fn color_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal())
@@ -139,6 +141,25 @@ pub fn print_result(result: &str) {
     println!("  {}-> {}{}", dim(), preview, reset());
 }
 
+pub fn print_turn_usage(
+    input_tokens: u64,
+    output_tokens: u64,
+    turn_cost: Option<f64>,
+    session_cost: Option<f64>,
+) {
+    if input_tokens == 0 && output_tokens == 0 {
+        return;
+    }
+    let mut line = format!("  tokens: {} in / {} out", input_tokens, output_tokens);
+    if let Some(cost) = turn_cost {
+        line.push_str(&format!(" · ~{}", format_usd(cost)));
+    }
+    if let Some(total) = session_cost {
+        line.push_str(&format!(" (session: {})", format_usd(total)));
+    }
+    println!("{}{}{}", dim(), line, reset());
+}
+
 pub fn can_select() -> bool {
     if std::env::var("TERM").ok().as_deref() == Some("dumb") {
         return false;
@@ -191,6 +212,325 @@ pub fn select(prompt: &str, items: &[String], initial: usize) -> Option<usize> {
             _ => {}
         }
     }
+}
+
+/// Interactive model picker with aligned cost-tier columns, `/` search,
+/// `Tab` tier filtering, and `s` price sorting.
+pub fn select_model(prompt: &str, models: &[ModelInfo], initial: usize) -> Option<usize> {
+    if models.is_empty() || !can_select() {
+        return None;
+    }
+    let _guard = TerminalGuard::enter().ok()?;
+    let mut stdout = io::stdout();
+    let mut query = String::new();
+    let mut filtering = false;
+    let mut tier_filter: Option<CostTier> = None;
+    let mut sort_by_price = false;
+
+    let mut visible = filter_and_sort_model_indices(models, &query, tier_filter, sort_by_price);
+    let initial_pos = visible.iter().position(|&idx| idx == initial).unwrap_or(0);
+    let mut state = PickerState::new(visible.len().max(1), initial_pos, 1);
+
+    loop {
+        let (_, height) = terminal::size().ok()?;
+        let viewport = usize::from(height).saturating_sub(2).max(1);
+        state.resize(viewport);
+        render_model_select(
+            &mut stdout,
+            prompt,
+            models,
+            &visible,
+            &state,
+            &query,
+            filtering,
+            tier_filter,
+            sort_by_price,
+        )
+        .ok()?;
+
+        match event::read().ok()? {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('c'))
+                {
+                    return None;
+                }
+                if filtering {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            filtering = false;
+                            continue;
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                        }
+                        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            query.push(ch);
+                        }
+                        _ => continue,
+                    }
+                    visible =
+                        filter_and_sort_model_indices(models, &query, tier_filter, sort_by_price);
+                    state = PickerState::new(visible.len().max(1), 0, viewport);
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Up => state.up(),
+                    KeyCode::Char('k') if key.modifiers.is_empty() => state.up(),
+                    KeyCode::Down => state.down(),
+                    KeyCode::Char('j') if key.modifiers.is_empty() => state.down(),
+                    KeyCode::PageUp => state.page_up(),
+                    KeyCode::PageDown => state.page_down(),
+                    KeyCode::Home => state.home(),
+                    KeyCode::End => state.end(),
+                    KeyCode::Char('/') if key.modifiers.is_empty() => {
+                        filtering = true;
+                    }
+                    KeyCode::Tab => {
+                        tier_filter = next_tier_filter(tier_filter);
+                        visible = filter_and_sort_model_indices(
+                            models,
+                            &query,
+                            tier_filter,
+                            sort_by_price,
+                        );
+                        state = PickerState::new(visible.len().max(1), 0, viewport);
+                    }
+                    KeyCode::Char('s') if key.modifiers.is_empty() => {
+                        sort_by_price = !sort_by_price;
+                        visible = filter_and_sort_model_indices(
+                            models,
+                            &query,
+                            tier_filter,
+                            sort_by_price,
+                        );
+                        state = PickerState::new(visible.len().max(1), 0, viewport);
+                    }
+                    KeyCode::Enter => {
+                        if let Some(&model_idx) = visible.get(state.selected) {
+                            return Some(model_idx);
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if !query.is_empty() || tier_filter.is_some() {
+                            query.clear();
+                            tier_filter = None;
+                            visible = filter_and_sort_model_indices(
+                                models,
+                                &query,
+                                tier_filter,
+                                sort_by_price,
+                            );
+                            state = PickerState::new(visible.len().max(1), 0, viewport);
+                        } else {
+                            return None;
+                        }
+                    }
+                    KeyCode::Char('q') if key.modifiers.is_empty() => return None,
+                    _ => {}
+                }
+            }
+            Event::Resize(_, _) => {}
+            _ => {}
+        }
+    }
+}
+
+fn next_tier_filter(current: Option<CostTier>) -> Option<CostTier> {
+    match current {
+        None => Some(CostTier::Free),
+        Some(CostTier::Free) => Some(CostTier::Cheap),
+        Some(CostTier::Cheap) => Some(CostTier::Standard),
+        Some(CostTier::Standard) => Some(CostTier::Expensive),
+        Some(CostTier::Expensive) => None,
+    }
+}
+
+pub fn filter_and_sort_model_indices(
+    models: &[ModelInfo],
+    query: &str,
+    tier_filter: Option<CostTier>,
+    sort_by_price: bool,
+) -> Vec<usize> {
+    let needle = query.trim().to_ascii_lowercase();
+    let mut indices: Vec<usize> = models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| {
+            if !needle.is_empty() && !model.id.to_ascii_lowercase().contains(&needle) {
+                return false;
+            }
+            if let Some(target_tier) = tier_filter {
+                match model.pricing {
+                    Some(pricing) => pricing.tier() == target_tier,
+                    None => false,
+                }
+            } else {
+                true
+            }
+        })
+        .map(|(index, _)| index)
+        .collect();
+
+    if sort_by_price {
+        indices.sort_by(|&a, &b| {
+            let pa = models[a].pricing.map(|p| p.sort_key());
+            let pb = models[b].pricing.map(|p| p.sort_key());
+            match (pa, pb) {
+                (Some(ka), Some(kb)) => ka
+                    .partial_cmp(&kb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| models[a].id.cmp(&models[b].id)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => models[a].id.cmp(&models[b].id),
+            }
+        });
+    }
+    indices
+}
+
+pub fn format_model_columns(model: &ModelInfo, width: usize) -> (String, String, Option<CostTier>) {
+    let (tag, tier) = match model.pricing {
+        Some(pricing) => (pricing.compact_label(), Some(pricing.tier())),
+        None => (String::new(), None),
+    };
+    if tag.is_empty() || width < 20 {
+        return (clip_line(&model.id, width), String::new(), tier);
+    }
+    let tag_len = tag.chars().count();
+    let left_width = width.saturating_sub(tag_len + 2).max(1);
+    let left = clip_line(&model.id, left_width);
+    (left, tag, tier)
+}
+
+fn tier_color(tier: CostTier) -> Color {
+    match tier {
+        CostTier::Free => Color::Green,
+        CostTier::Cheap => Color::Cyan,
+        CostTier::Standard => Color::Yellow,
+        CostTier::Expensive => Color::Red,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_model_select(
+    stdout: &mut io::Stdout,
+    prompt: &str,
+    models: &[ModelInfo],
+    visible: &[usize],
+    state: &PickerState,
+    query: &str,
+    filtering: bool,
+    tier_filter: Option<CostTier>,
+    sort_by_price: bool,
+) -> io::Result<()> {
+    let (width, height) = terminal::size()?;
+    let width = usize::from(width).max(1);
+    let height = usize::from(height).max(1);
+    let content_width = width.saturating_sub(1).max(1);
+    let viewport = height.saturating_sub(2).max(1);
+
+    queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
+    let mut title = format!("{prompt} ({}/{})", visible.len(), models.len());
+    if let Some(tier) = tier_filter {
+        title.push_str(&format!(" [tier: {}]", tier.label()));
+    }
+    if sort_by_price {
+        title.push_str(" [sorted: price]");
+    }
+    if filtering || !query.is_empty() {
+        title.push_str(&format!(" /{}", query));
+        if filtering {
+            title.push('_');
+        }
+    }
+    queue!(
+        stdout,
+        SetAttribute(Attribute::Bold),
+        Print(clip_line(&title, content_width)),
+        SetAttribute(Attribute::Reset)
+    )?;
+
+    for row in 0..viewport {
+        let y = (row + 1) as u16;
+        queue!(stdout, MoveTo(0, y), Clear(ClearType::CurrentLine))?;
+        let Some(&model_idx) = visible.get(state.offset + row) else {
+            if row == 0 && visible.is_empty() {
+                queue!(
+                    stdout,
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(clip_line("  (no matching models)", content_width)),
+                    ResetColor
+                )?;
+            }
+            continue;
+        };
+        let selected = state.offset + row == state.selected;
+        let prefix = if selected { "> " } else { "  " };
+        let row_width = content_width.saturating_sub(2).max(1);
+        let (left, tag, tier) = format_model_columns(&models[model_idx], row_width);
+
+        if selected {
+            let combined = if tag.is_empty() {
+                format!("{prefix}{left}")
+            } else {
+                format!("{prefix}{left}  {tag}")
+            };
+            queue!(
+                stdout,
+                SetAttribute(Attribute::Reverse),
+                Print(clip_line(&combined, content_width)),
+                SetAttribute(Attribute::Reset)
+            )?;
+        } else {
+            queue!(stdout, Print(prefix), Print(&left))?;
+            if !tag.is_empty() {
+                queue!(stdout, Print("  "))?;
+                if let Some(t) = tier {
+                    queue!(
+                        stdout,
+                        SetForegroundColor(tier_color(t)),
+                        Print(&tag),
+                        ResetColor
+                    )?;
+                } else {
+                    queue!(stdout, Print(&tag))?;
+                }
+            }
+        }
+    }
+
+    let footer_y = height.saturating_sub(1).min(usize::from(u16::MAX)) as u16;
+    let footer_hint = if filtering {
+        "Type to filter  Backspace delete  Enter/Esc done"
+    } else {
+        "/ filter  Tab tier  s price-sort  Enter select  Esc cancel"
+    };
+    queue!(
+        stdout,
+        MoveTo(0, footer_y),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(Color::DarkGrey),
+        Print(clip_line(footer_hint, content_width)),
+        ResetColor
+    )?;
+    if !visible.is_empty() && visible.len() > viewport {
+        let position = format!("{}/{}", state.selected + 1, visible.len());
+        let x = width
+            .saturating_sub(position.chars().count())
+            .max(1)
+            .min(usize::from(u16::MAX)) as u16;
+        queue!(
+            stdout,
+            MoveTo(x, footer_y),
+            SetForegroundColor(Color::DarkGrey),
+            Print(position),
+            ResetColor
+        )?;
+    }
+    stdout.flush()
 }
 
 struct TerminalGuard;
@@ -445,5 +785,53 @@ mod tests {
         assert_eq!(state.height, 3);
         assert_eq!(state.selected, 15);
         assert_eq!(state.offset, 13);
+    }
+
+    #[test]
+    fn model_picker_filters_and_sorts_by_price() {
+        use super::*;
+        use crate::router::ModelPricing;
+        let models = vec![
+            ModelInfo {
+                id: "opus".to_string(),
+                pricing: Some(ModelPricing {
+                    input_per_million: 15.0,
+                    output_per_million: 75.0,
+                }),
+            },
+            ModelInfo {
+                id: "llama-free".to_string(),
+                pricing: Some(ModelPricing {
+                    input_per_million: 0.0,
+                    output_per_million: 0.0,
+                }),
+            },
+            ModelInfo {
+                id: "haiku-cheap".to_string(),
+                pricing: Some(ModelPricing {
+                    input_per_million: 0.25,
+                    output_per_million: 1.25,
+                }),
+            },
+            ModelInfo {
+                id: "unpriced".to_string(),
+                pricing: None,
+            },
+        ];
+
+        let sorted = filter_and_sort_model_indices(&models, "", None, true);
+        assert_eq!(sorted, vec![1, 2, 0, 3]);
+
+        let cheap_only = filter_and_sort_model_indices(&models, "", Some(CostTier::Cheap), false);
+        assert_eq!(cheap_only, vec![2]);
+
+        let filtered = filter_and_sort_model_indices(&models, "free", None, false);
+        assert_eq!(filtered, vec![1]);
+
+        let (left, tag, tier) = format_model_columns(&models[0], 50);
+        assert_eq!(tier, Some(CostTier::Expensive));
+        assert_eq!(tag, "[exp] $15.00/$75.00");
+        assert!(left.starts_with("opus"));
+        assert_eq!(left.chars().count() + 2 + tag.chars().count(), 50);
     }
 }

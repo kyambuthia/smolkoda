@@ -319,11 +319,9 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                             .position(|model| model.id == current)
                             .unwrap_or(0);
                         if ui::can_select() {
-                            let labels: Vec<String> = models
-                                .iter()
-                                .map(router::ModelInfo::display_label)
-                                .collect();
-                            if let Some(index) = ui::select("Choose a model", &labels, selected) {
+                            if let Some(index) =
+                                ui::select_model("Choose a model", &models, selected)
+                            {
                                 set_model(looper, config, path, &models[index].id);
                             }
                         } else {

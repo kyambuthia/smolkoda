@@ -29,6 +29,7 @@ impl Looper {
 
     /// Run one user turn and return the final assistant text for voice playback.
     pub fn run_turn_with_output(&mut self, input: &str) -> Result<String, String> {
+        let start_usage = self.router.usage();
         let mut working = self.feed.clone();
         working.push_user(input);
         let system = system_prompt();
@@ -39,6 +40,7 @@ impl Looper {
                 ui::print_text("(empty response)");
                 working.push_assistant(vec![Block::Text("(empty response)".to_string())]);
                 self.feed = working;
+                self.print_usage_delta(start_usage);
                 return Ok(String::new());
             }
             working.push_assistant(blocks.clone());
@@ -76,6 +78,7 @@ impl Looper {
 
             if results.is_empty() {
                 self.feed = working;
+                self.print_usage_delta(start_usage);
                 return Ok(step_text.join("\n"));
             }
             working.push_tool_results(results);
@@ -85,6 +88,21 @@ impl Looper {
             "looper exceeded {} steps; stopping to avoid a runaway loop",
             self.max_steps
         ))
+    }
+}
+
+impl Looper {
+    fn print_usage_delta(&self, start: crate::router::SessionUsage) {
+        let end = self.router.usage();
+        let turn_in = end.input_tokens.saturating_sub(start.input_tokens);
+        let turn_out = end.output_tokens.saturating_sub(start.output_tokens);
+        let turn_cost = if end.has_reported_cost {
+            Some((end.reported_cost_usd - start.reported_cost_usd).max(0.0))
+        } else {
+            None
+        };
+        let session_cost = end.has_reported_cost.then_some(end.reported_cost_usd);
+        ui::print_turn_usage(turn_in, turn_out, turn_cost, session_cost);
     }
 }
 

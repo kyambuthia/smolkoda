@@ -358,8 +358,7 @@ fn ask_model(default: Option<&str>, models: Option<&[ModelInfo]>) -> Option<Stri
         .and_then(|model| models.iter().position(|candidate| candidate.id == model))
         .unwrap_or(0);
     if ui::can_select() {
-        let labels: Vec<String> = models.iter().map(ModelInfo::display_label).collect();
-        return ui::select("Choose a model", &labels, suggested_index)
+        return ui::select_model("Choose a model", models, suggested_index)
             .map(|index| models[index].id.clone());
     }
     let suggested = models.get(suggested_index).map(|model| model.id.as_str());

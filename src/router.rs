@@ -61,6 +61,29 @@ impl ModelPricing {
         )
     }
 
+    pub fn compact_label(self) -> String {
+        let tier = self.tier();
+        if tier == CostTier::Free {
+            return "[free]".to_string();
+        }
+        let short_tier = match tier {
+            CostTier::Free => "free",
+            CostTier::Cheap => "cheap",
+            CostTier::Standard => "std",
+            CostTier::Expensive => "exp",
+        };
+        format!(
+            "[{}] {}/{}",
+            short_tier,
+            format_usd(self.input_per_million),
+            format_usd(self.output_per_million)
+        )
+    }
+
+    pub fn sort_key(self) -> f64 {
+        self.input_per_million + self.output_per_million
+    }
+
     pub fn estimate_cost(self, input_tokens: u64, output_tokens: u64) -> f64 {
         (input_tokens as f64 / 1_000_000.0) * self.input_per_million
             + (output_tokens as f64 / 1_000_000.0) * self.output_per_million
