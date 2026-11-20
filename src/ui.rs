@@ -90,7 +90,7 @@ pub enum AnimKind {
 
 const BAYER_4X4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
-/// Pure time-based Bayer dither frame generator for loading and waiting states.
+/// Pure time-based Bayer dither frame generator with distinct motion per state.
 pub fn dither_frame(t_ms: u64, width: usize, kind: AnimKind, utf8: bool) -> String {
     if width == 0 {
         return String::new();
@@ -99,28 +99,53 @@ pub fn dither_frame(t_ms: u64, width: usize, kind: AnimKind, utf8: bool) -> Stri
         &[' ', '.', ':', '-', '=', '+', '*', '#']
     } else {
         match kind {
-            AnimKind::Think | AnimKind::Voice => &[' ', '⠁', '⠃', '⠇', '⠏', '⠟', '⠿', '⣿'],
+            AnimKind::Think => &[' ', '⠁', '⠃', '⠇', '⠏', '⠟', '⠿', '⣿'],
             AnimKind::Tool | AnimKind::Fetch => &[' ', '░', '▒', '▓', '█'],
+            AnimKind::Voice => &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'],
         }
     };
     let speed = match kind {
-        AnimKind::Think => 75,
-        AnimKind::Tool => 55,
-        AnimKind::Fetch => 90,
-        AnimKind::Voice => 60,
+        AnimKind::Think => 70,
+        AnimKind::Tool => 50,
+        AnimKind::Fetch => 65,
+        AnimKind::Voice => 55,
     };
     let phase = (t_ms / speed) as usize;
     let bayer_y = ((t_ms / (speed * 2)) % 4) as usize;
-    let period = 24usize;
-    let half = period / 2;
+    let center = (width as isize - 1) / 2;
 
     let mut out = String::with_capacity(width * 3);
     for x in 0..width {
-        let pos = (x * 2 + phase) % period;
-        let tri = if pos <= half { pos } else { period - pos };
-        let level = (tri * 63) / half;
+        let level = match kind {
+            AnimKind::Tool => {
+                // Directional left-to-right sweep
+                let period = width.max(8) * 2;
+                let dist = (phase + period - (x % period)) % period;
+                if dist < 6 {
+                    63 - dist * 10
+                } else {
+                    4
+                }
+            }
+            AnimKind::Voice => {
+                // Symmetric center-out pulse
+                let d = (x as isize - center).unsigned_abs();
+                let period = 16usize;
+                let pos = (d * 2 + phase) % period;
+                let half = period / 2;
+                let tri = if pos <= half { pos } else { period - pos };
+                (tri * 63) / half
+            }
+            AnimKind::Think | AnimKind::Fetch => {
+                let period = 20usize;
+                let half = period / 2;
+                let pos = (x * 2 + phase) % period;
+                let tri = if pos <= half { pos } else { period - pos };
+                (tri * 63) / half
+            }
+        };
         let threshold = usize::from(BAYER_4X4[bayer_y][x % 4]) * 4;
-        let dithered = (level + threshold).saturating_sub(28).min(63);
+        let dithered = (level + threshold).saturating_sub(26).min(63);
         let idx = (dithered * (ramp.len() - 1)) / 63;
         out.push(ramp[idx]);
     }
@@ -176,24 +201,36 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
         loop {
             let elapsed = start.elapsed();
             let t_ms = elapsed.as_millis() as u64;
-            let bar = dither_frame(t_ms, 10, kind, utf8);
+            let bar_width = if kind == AnimKind::Fetch { 14 } else { 10 };
+            let bar = dither_frame(t_ms, bar_width, kind, utf8);
             let width = terminal::size()
                 .map(|(w, _)| usize::from(w))
                 .unwrap_or(80)
                 .saturating_sub(1)
                 .max(1);
             let suffix = if elapsed.as_secs() >= 1 {
-                format!(" {}s", elapsed.as_secs())
+                format!(" {:.1}s", elapsed.as_secs_f64())
             } else {
                 String::new()
             };
-            let text = format!("{bar} {bg_label}{suffix}");
-            let clipped = clip_line(&text, width);
+            let rest = clip_line(
+                &format!("{bg_label}{suffix}"),
+                width.saturating_sub(bar_width + 1),
+            );
 
             if let Ok(active) = STATUS_MUTEX.lock() {
                 if active.is_some() {
                     let mut err = io::stderr().lock();
-                    let _ = write!(err, "\r{}{}{}\x1b[K", dim(), clipped.trim_end(), reset());
+                    let _ = write!(
+                        err,
+                        "\r{}{}{} {}{}{}\x1b[K",
+                        cyan(),
+                        bar,
+                        reset(),
+                        dim(),
+                        rest.trim_end(),
+                        reset()
+                    );
                     let _ = err.flush();
                     drawn_bg.store(true, Ordering::Relaxed);
                 }
@@ -203,7 +240,7 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
                 Ok(g) => g,
                 Err(_) => break,
             };
-            let (guard, _) = match cvar.wait_timeout(guard, Duration::from_millis(80)) {
+            let (guard, _) = match cvar.wait_timeout(guard, Duration::from_millis(60)) {
                 Ok(res) => res,
                 Err(_) => break,
             };
@@ -296,19 +333,27 @@ pub fn prompt() {
 }
 
 pub fn banner(model: &str, provider: &str, _endpoint: &str) {
-    let dot = if is_utf8_locale() { "·" } else { "-" };
+    let utf8 = is_utf8_locale();
+    let (top, mid, bot, dot) = if utf8 {
+        ("╭─", "│ ", "╰─", "·")
+    } else {
+        ("+-", "| ", "+-", "-")
+    };
     println!(
-        "{}smolkoda{} {}v{}{}",
+        "{}{} {}smolkoda{} {}v{}{}",
+        dim(),
+        top,
         bold(),
         reset(),
         dim(),
         env!("CARGO_PKG_VERSION"),
         reset()
     );
-    println!("{}{} {} {}{}", dim(), model, dot, provider, reset());
+    println!("{}{} {} {} {}{}", dim(), mid, model, dot, provider, reset());
     println!(
-        "{}/help {} /model {} /cost {} /quit{}\n",
+        "{}{} /help {} /model {} /cost {} /quit{}\n",
         dim(),
+        bot,
         dot,
         dot,
         dot,
@@ -348,7 +393,7 @@ pub fn print_tool(name: &str, args: &Value) {
     let preview = tool_preview_arg(name, args)
         .map(value_preview)
         .unwrap_or_default();
-    let glyph = if is_utf8_locale() { "▸" } else { ">" };
+    let glyph = if is_utf8_locale() { "┌▸" } else { "+>" };
     println!(
         "\n{}{} {}{} {}{}{}",
         cyan(),
@@ -375,7 +420,7 @@ pub fn print_result(result: &str, elapsed: Duration) {
     } else if first.chars().count() > 72 {
         preview.push_str("...");
     }
-    let prefix = if is_utf8_locale() { "└" } else { "|-" };
+    let prefix = if is_utf8_locale() { "└─" } else { "+-" };
     let dot = if is_utf8_locale() { "·" } else { "-" };
     let ms = elapsed.as_millis();
     let timing = if ms >= 1000 {
@@ -384,7 +429,7 @@ pub fn print_result(result: &str, elapsed: Duration) {
         format!("{ms}ms")
     };
     println!(
-        "  {}{} {} {} {}{}",
+        "{}{} {} {} {}{}",
         dim(),
         prefix,
         preview,
@@ -432,7 +477,7 @@ pub fn select(prompt: &str, items: &[String], initial: usize) -> Option<usize> {
 
     loop {
         let (_, height) = terminal::size().unwrap_or((80, 24));
-        let viewport = usize::from(height).saturating_sub(2).max(1);
+        let viewport = usize::from(height).saturating_sub(3).max(1);
         state.resize(viewport);
         render_select(&mut stdout, prompt, items, &state).ok()?;
 
@@ -483,7 +528,7 @@ pub fn select_model(prompt: &str, models: &[ModelInfo], initial: usize) -> Optio
 
     loop {
         let (_, height) = terminal::size().unwrap_or((80, 24));
-        let header_rows = if has_pricing { 2 } else { 1 };
+        let header_rows = if has_pricing { 4 } else { 3 };
         let viewport = usize::from(height).saturating_sub(header_rows + 1).max(1);
         state.resize(viewport);
         render_model_select(
@@ -648,13 +693,15 @@ pub fn tab_bar(width: usize, counts: [usize; 5], active: Option<CostTier>) -> St
         (Some(CostTier::Standard), "Std", counts[3]),
         (Some(CostTier::Expensive), "Exp", counts[4]),
     ];
-    if width < 48 {
+    let utf8 = is_utf8_locale();
+    let (l_arrow, r_arrow) = if utf8 { ("◀", "▶") } else { ("<", ">") };
+    if width < 54 {
         let (_, name, count) = tabs
             .iter()
             .find(|(tier, _, _)| *tier == active)
             .copied()
             .unwrap_or(tabs[0]);
-        return clip_line(&format!("< {name} {count} >"), width);
+        return clip_line(&format!("{l_arrow} [{name} {count}] {r_arrow}"), width);
     }
     let parts: Vec<String> = tabs
         .iter()
@@ -666,7 +713,7 @@ pub fn tab_bar(width: usize, counts: [usize; 5], active: Option<CostTier>) -> St
             }
         })
         .collect();
-    clip_line(&parts.join(" "), width)
+    clip_line(&format!("{l_arrow} {} {r_arrow}", parts.join(" ")), width)
 }
 
 pub fn filter_and_sort_model_indices(
@@ -823,6 +870,45 @@ impl PickerState {
     }
 }
 
+pub fn scrollbar_thumb(offset: usize, viewport: usize, total: usize, row: usize) -> bool {
+    if total <= viewport || viewport == 0 {
+        return false;
+    }
+    let max_offset = total.saturating_sub(viewport).max(1);
+    let thumb_row = (offset * (viewport - 1)) / max_offset;
+    row == thumb_row
+}
+
+pub fn box_border_line(
+    left_cap: &str,
+    label: &str,
+    fill: &str,
+    right_cap: &str,
+    width: usize,
+) -> String {
+    if width < 6 {
+        return clip_line(label, width);
+    }
+    let mut base = if label.is_empty() {
+        left_cap.to_string()
+    } else {
+        format!("{left_cap} {label} ")
+    };
+    let used = base.chars().count() + right_cap.chars().count();
+    if used > width {
+        let trimmed: String = base
+            .chars()
+            .take(width.saturating_sub(right_cap.chars().count()))
+            .collect();
+        return format!("{trimmed}{right_cap}");
+    }
+    for _ in 0..(width - used) {
+        base.push_str(fill);
+    }
+    base.push_str(right_cap);
+    base
+}
+
 fn render_select(
     stdout: &mut io::Stdout,
     prompt: &str,
@@ -832,26 +918,52 @@ fn render_select(
     let (width, height) = terminal::size().unwrap_or((80, 24));
     let width = usize::from(width).max(1);
     let height = usize::from(height).max(1);
-    let content_width = width.saturating_sub(1).max(1);
-    let viewport = height.saturating_sub(2).max(1);
-    let marker = if is_utf8_locale() { "▌ " } else { "> " };
+    let box_width = width.saturating_sub(1).max(12);
+    let inner_width = box_width.saturating_sub(4).max(1);
+    let viewport = height.saturating_sub(3).max(1);
+    let utf8 = is_utf8_locale();
+    let (tl, tr, bl, br, hz, vt, thumb, marker) = if utf8 {
+        ("╭─", "─╮", "╰─", "─╯", "─", "│", "┃", "▌ ")
+    } else {
+        ("+-", "-+", "+-", "-+", "-", "|", "#", "> ")
+    };
 
     queue!(stdout, MoveTo(0, 0), Clear(ClearType::UntilNewLine))?;
-    let title = format!("{prompt} ({})", items.len());
+    let title = format!("{prompt} ({}/{})", state.selected + 1, items.len());
     queue!(
         stdout,
-        SetAttribute(Attribute::Bold),
-        Print(clip_line(&title, content_width)),
-        SetAttribute(Attribute::Reset)
+        SetForegroundColor(Color::Cyan),
+        Print(box_border_line(tl, &title, hz, tr, box_width)),
+        ResetColor
     )?;
 
     for row in 0..viewport {
         let y = (row + 1) as u16;
         queue!(stdout, MoveTo(0, y), Clear(ClearType::UntilNewLine))?;
+        let rail = if scrollbar_thumb(state.offset, viewport, items.len(), row) {
+            thumb
+        } else {
+            vt
+        };
         let Some(item) = items.get(state.offset + row) else {
+            let empty = clip_line("", inner_width);
+            queue!(
+                stdout,
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("{vt} {empty} {rail}")),
+                ResetColor
+            )?;
             continue;
         };
         let selected = state.offset + row == state.selected;
+        let row_inner = inner_width.saturating_sub(2).max(1);
+        let text = clip_line(item, row_inner);
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{vt} ")),
+            ResetColor
+        )?;
         if selected {
             queue!(
                 stdout,
@@ -859,44 +971,34 @@ fn render_select(
                 Print(marker),
                 ResetColor,
                 SetAttribute(Attribute::Bold),
-                Print(clip_line(item, content_width.saturating_sub(2).max(1))),
+                Print(&text),
                 SetAttribute(Attribute::Reset)
             )?;
         } else {
-            queue!(
-                stdout,
-                Print("  "),
-                Print(clip_line(item, content_width.saturating_sub(2).max(1)))
-            )?;
+            queue!(stdout, Print("  "), Print(&text))?;
         }
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!(" {rail}")),
+            ResetColor
+        )?;
     }
 
     let footer_y = height.saturating_sub(1).min(usize::from(u16::MAX)) as u16;
+    let hint = if utf8 {
+        "↑↓ move · PgUp/Dn page · Enter select · Esc cancel"
+    } else {
+        "Up/Down move · PgUp/Dn page · Enter select · Esc cancel"
+    };
     queue!(
         stdout,
         MoveTo(0, footer_y),
         Clear(ClearType::UntilNewLine),
         SetForegroundColor(Color::DarkGrey),
-        Print(clip_line(
-            "Up/Down scroll  PgUp/PgDn page  Enter select  Esc cancel",
-            content_width
-        )),
+        Print(box_border_line(bl, hint, hz, br, box_width)),
         ResetColor
     )?;
-    if items.len() > viewport {
-        let position = format!("{}/{}", state.selected + 1, items.len());
-        let x = width
-            .saturating_sub(position.chars().count())
-            .max(1)
-            .min(usize::from(u16::MAX)) as u16;
-        queue!(
-            stdout,
-            MoveTo(x, footer_y),
-            SetForegroundColor(Color::DarkGrey),
-            Print(position),
-            ResetColor
-        )?;
-    }
     stdout.flush()
 }
 
@@ -915,57 +1017,130 @@ fn render_model_select(
     let (width, height) = terminal::size().unwrap_or((80, 24));
     let width = usize::from(width).max(1);
     let height = usize::from(height).max(1);
-    let content_width = width.saturating_sub(1).max(1);
-    let header_rows = if has_pricing { 2 } else { 1 };
+    let box_width = width.saturating_sub(1).max(20);
+    let inner_width = box_width.saturating_sub(4).max(1);
+    let header_rows = if has_pricing { 4 } else { 3 };
     let viewport = height.saturating_sub(header_rows + 1).max(1);
-    let marker = if is_utf8_locale() { "▌ " } else { "> " };
+    let utf8 = is_utf8_locale();
+    let (tl, tr, ml, mr, bl, br, hz, vt, thumb, marker) = if utf8 {
+        ("╭─", "─╮", "├─", "─┤", "╰─", "─╯", "─", "│", "┃", "▌ ")
+    } else {
+        ("+-", "-+", "+-", "-+", "+-", "-+", "-", "|", "#", "> ")
+    };
 
+    // Row 0: top container border with title + sort badge
     queue!(stdout, MoveTo(0, 0), Clear(ClearType::UntilNewLine))?;
     let mut title = format!("{prompt} ({}/{})", visible.len(), models.len());
     if sort_by_price {
-        title.push_str("  [cheapest]");
-    }
-    if !query.is_empty() {
-        title.push_str(&format!("  /{query}_"));
+        title.push_str(" [cheapest]");
     }
     queue!(
         stdout,
-        SetAttribute(Attribute::Bold),
-        Print(clip_line(&title, content_width)),
-        SetAttribute(Attribute::Reset)
+        SetForegroundColor(Color::Cyan),
+        Print(box_border_line(tl, &title, hz, tr, box_width)),
+        ResetColor
     )?;
 
+    let mut cur_y = 1u16;
+    // Optional tab row
     if has_pricing {
         let counts = tier_counts(models, query);
-        let bar = tab_bar(content_width, counts, tier_filter);
+        let bar = tab_bar(inner_width, counts, tier_filter);
         queue!(
             stdout,
-            MoveTo(0, 1),
+            MoveTo(0, cur_y),
             Clear(ClearType::UntilNewLine),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{vt} ")),
             SetForegroundColor(Color::Cyan),
-            Print(bar),
+            Print(&bar),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!(" {vt}")),
             ResetColor
         )?;
+        cur_y += 1;
     }
 
+    // Dedicated filter input row
+    queue!(stdout, MoveTo(0, cur_y), Clear(ClearType::UntilNewLine))?;
+    let filter_text = if query.is_empty() {
+        "filter: (type to search)".to_string()
+    } else {
+        format!("filter: {query}_")
+    };
+    let filter_clipped = clip_line(&filter_text, inner_width);
+    queue!(
+        stdout,
+        SetForegroundColor(Color::DarkGrey),
+        Print(format!("{vt} ")),
+        ResetColor
+    )?;
+    if query.is_empty() {
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print(&filter_clipped),
+            ResetColor
+        )?;
+    } else {
+        queue!(
+            stdout,
+            SetAttribute(Attribute::Bold),
+            Print(&filter_clipped),
+            SetAttribute(Attribute::Reset)
+        )?;
+    }
+    queue!(
+        stdout,
+        SetForegroundColor(Color::DarkGrey),
+        Print(format!(" {vt}")),
+        ResetColor
+    )?;
+    cur_y += 1;
+
+    // Divider between header/filter and list
+    queue!(
+        stdout,
+        MoveTo(0, cur_y),
+        Clear(ClearType::UntilNewLine),
+        SetForegroundColor(Color::DarkGrey),
+        Print(box_border_line(ml, "", hz, mr, box_width)),
+        ResetColor
+    )?;
+
+    // List rows with right-edge scrollbar
     for row in 0..viewport {
         let y = (row + header_rows) as u16;
         queue!(stdout, MoveTo(0, y), Clear(ClearType::UntilNewLine))?;
+        let rail = if scrollbar_thumb(state.offset, viewport, visible.len(), row) {
+            thumb
+        } else {
+            vt
+        };
         let Some(&model_idx) = visible.get(state.offset + row) else {
-            if row == 0 && visible.is_empty() {
-                queue!(
-                    stdout,
-                    SetForegroundColor(Color::DarkGrey),
-                    Print(clip_line("  (no matching models)", content_width)),
-                    ResetColor
-                )?;
-            }
+            let empty_msg = if row == 0 && visible.is_empty() {
+                clip_line("  (no matching models)", inner_width)
+            } else {
+                clip_line("", inner_width)
+            };
+            queue!(
+                stdout,
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("{vt} {empty_msg} {rail}")),
+                ResetColor
+            )?;
             continue;
         };
         let selected = state.offset + row == state.selected;
-        let row_width = content_width.saturating_sub(2).max(1);
+        let row_width = inner_width.saturating_sub(2).max(1);
         let (left, tag, tier) = format_model_columns(&models[model_idx], row_width);
 
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{vt} ")),
+            ResetColor
+        )?;
         if selected {
             queue!(
                 stdout,
@@ -992,36 +1167,45 @@ fn render_model_select(
                 queue!(stdout, Print(&tag))?;
             }
         }
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!(" {rail}")),
+            ResetColor
+        )?;
     }
 
+    // Bottom container border with explicit arrow directions + dynamic Esc action
     let footer_y = height.saturating_sub(1).min(usize::from(u16::MAX)) as u16;
-    let footer_hint = if has_pricing {
-        "Type to filter  Tab/Arrows tier  Ctrl-S price-sort  Enter select  Esc cancel"
+    let esc_action = if !query.is_empty() || tier_filter.is_some() {
+        "Esc clear"
     } else {
-        "Type to filter  Enter select  Esc cancel"
+        "Esc cancel"
+    };
+    let pos_tag = if !visible.is_empty() {
+        format!(" {}/{} ", state.selected + 1, visible.len())
+    } else {
+        String::new()
+    };
+    let hint = if has_pricing {
+        if utf8 {
+            format!("↑↓ move · ←→ tab · Ctrl-S sort · Enter · {esc_action}{pos_tag}")
+        } else {
+            format!("Up/Dn move · L/R tab · Ctrl-S sort · Enter · {esc_action}{pos_tag}")
+        }
+    } else if utf8 {
+        format!("↑↓ move · Enter select · {esc_action}{pos_tag}")
+    } else {
+        format!("Up/Dn move · Enter select · {esc_action}{pos_tag}")
     };
     queue!(
         stdout,
         MoveTo(0, footer_y),
         Clear(ClearType::UntilNewLine),
         SetForegroundColor(Color::DarkGrey),
-        Print(clip_line(footer_hint, content_width)),
+        Print(box_border_line(bl, &hint, hz, br, box_width)),
         ResetColor
     )?;
-    if !visible.is_empty() && visible.len() > viewport {
-        let position = format!("{}/{}", state.selected + 1, visible.len());
-        let x = width
-            .saturating_sub(position.chars().count())
-            .max(1)
-            .min(usize::from(u16::MAX)) as u16;
-        queue!(
-            stdout,
-            MoveTo(x, footer_y),
-            SetForegroundColor(Color::DarkGrey),
-            Print(position),
-            ResetColor
-        )?;
-    }
     stdout.flush()
 }
 
@@ -1165,7 +1349,7 @@ mod tests {
         let bar = tab_bar(80, counts, Some(CostTier::Cheap));
         assert!(bar.contains("[Cheap 1]"));
         let narrow = tab_bar(30, counts, Some(CostTier::Cheap));
-        assert!(narrow.starts_with("< Cheap 1 >"));
+        assert!(narrow.contains("[Cheap 1]"));
     }
 
     #[test]
@@ -1185,6 +1369,17 @@ mod tests {
     fn sanitize_strips_ansi_escapes_and_control_chars() {
         let raw = "hello\x1b[31m world\x1b[0m\r\n\t\x07ok";
         assert_eq!(sanitize(raw), "hello world\n\tok");
+    }
+
+    #[test]
+    fn container_helpers_respect_width_and_scrollbar() {
+        let border = box_border_line("╭─", "Title", "─", "─╮", 20);
+        assert_eq!(border.chars().count(), 20);
+        assert!(border.starts_with("╭─ Title "));
+        assert!(border.ends_with("─╮"));
+        assert!(scrollbar_thumb(0, 5, 20, 0));
+        assert!(scrollbar_thumb(15, 5, 20, 4));
+        assert!(!scrollbar_thumb(0, 10, 5, 0));
     }
 
     #[test]
