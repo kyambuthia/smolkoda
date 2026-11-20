@@ -168,6 +168,7 @@ Env overrides: `SMOLKODA_PROVIDER`, `SMOLKODA_MODEL`, `SMOLKODA_BASE_URL`,
 ## Notes
 
 - The harness uses native tool calling. The model/provider must support it.
+- HTTPS provider connections use the operating system certificate store, including custom enterprise or sandbox CA certificates.
 - Tools run with your user's permissions: `bash` can execute anything and `write`/`edit` can change any file you can. Use a container or VM for untrusted repositories.
 - API keys are stored as plaintext unless you use `env:NAME` or `${NAME}`. The config file is written with mode `0600`.
 - The project is intentionally small. Read the modules in order:

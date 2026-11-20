@@ -7,6 +7,7 @@
 - Add tests for provider configuration, response parsing, and file tools.
 - Add scrollable terminal pickers for provider and model selection.
 - Consolidate model selection under `/model`; the separate `/models` command is removed.
+- Use the operating system certificate store for HTTPS provider connections.
 - Fix the documented install command to use the Git repository until the crate is published.
 
 ## 0.1.0

@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "development-tools"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json", "native-certs"] }
 regex = "1"
 glob = "0.3"
 rpassword = "7"
