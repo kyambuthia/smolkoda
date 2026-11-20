@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::config::{self, Config};
 use crate::presets::{self, Auth, Protocol, PRESETS};
-use crate::router::Router;
+use crate::router::{ModelInfo, Router};
 use crate::ui;
 
 pub fn setup_wizard(
@@ -180,7 +180,10 @@ pub fn setup_wizard(
                     preset
                         .models
                         .iter()
-                        .map(|model| (*model).to_string())
+                        .map(|model| ModelInfo {
+                            id: (*model).to_string(),
+                            pricing: None,
+                        })
                         .collect()
                 })
             });
@@ -306,14 +309,13 @@ fn discover_models(
     auth: Auth,
     raw_key: &str,
     headers: &[(String, String)],
-) -> Option<Vec<String>> {
+) -> Option<Vec<ModelInfo>> {
     let api_key = config::resolve_secret(raw_key);
     if auth != Auth::None && api_key.is_empty() {
         ui::warn("No API key available; skipping model discovery.");
         return None;
     }
-    match crate::router::fetch_model_ids(base_url, auth, &api_key, headers, Duration::from_secs(30))
-    {
+    match crate::router::fetch_models(base_url, auth, &api_key, headers, Duration::from_secs(30)) {
         Ok(models) => {
             println!(
                 "{}Loaded {} models from provider.{}",
@@ -330,31 +332,32 @@ fn discover_models(
     }
 }
 
-fn ask_model(default: Option<&str>, models: Option<&[String]>) -> Option<String> {
+fn ask_model(default: Option<&str>, models: Option<&[ModelInfo]>) -> Option<String> {
     let Some(models) = models.filter(|models| !models.is_empty()) else {
         return ask("Model", default);
     };
     let suggested_index = default
-        .and_then(|model| models.iter().position(|candidate| candidate == model))
+        .and_then(|model| models.iter().position(|candidate| candidate.id == model))
         .unwrap_or(0);
     if ui::can_select() {
-        return ui::select("Choose a model", models, suggested_index)
-            .map(|index| models[index].clone());
+        let labels: Vec<String> = models.iter().map(ModelInfo::display_label).collect();
+        return ui::select("Choose a model", &labels, suggested_index)
+            .map(|index| models[index].id.clone());
     }
-    let suggested = models.get(suggested_index).map(String::as_str);
+    let suggested = models.get(suggested_index).map(|model| model.id.as_str());
     println!("\n{}Available models{}", ui::bold(), ui::reset());
     for (index, model) in models.iter().enumerate() {
-        let marker = if Some(model.as_str()) == suggested {
+        let marker = if Some(model.id.as_str()) == suggested {
             "*"
         } else {
             " "
         };
-        println!("  {:2}. {} {}", index + 1, marker, model);
+        println!("  {:2}. {} {}", index + 1, marker, model.display_label());
     }
     let choice = ask("Model number or ID", suggested)?;
     if let Ok(number) = choice.parse::<usize>() {
         if let Some(model) = number.checked_sub(1).and_then(|index| models.get(index)) {
-            return Some(model.clone());
+            return Some(model.id.clone());
         }
         ui::warn("Invalid model number; keeping the suggested model.");
         return suggested.map(str::to_string);

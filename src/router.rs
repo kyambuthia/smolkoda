@@ -9,10 +9,94 @@ use crate::feed::{Block, Feed};
 use crate::presets::{Auth, Protocol};
 use crate::tools;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostTier {
+    Free,
+    Cheap,
+    Standard,
+    Expensive,
+}
+
+impl CostTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Cheap => "cheap",
+            Self::Standard => "standard",
+            Self::Expensive => "expensive",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPricing {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+}
+
+impl ModelPricing {
+    pub fn tier(self) -> CostTier {
+        if self.input_per_million == 0.0 && self.output_per_million == 0.0 {
+            CostTier::Free
+        } else if self.output_per_million <= 2.0 && self.input_per_million <= 1.0 {
+            CostTier::Cheap
+        } else if self.output_per_million <= 20.0 && self.input_per_million <= 10.0 {
+            CostTier::Standard
+        } else {
+            CostTier::Expensive
+        }
+    }
+
+    pub fn format_label(self) -> String {
+        let tier = self.tier();
+        if tier == CostTier::Free {
+            return tier.label().to_string();
+        }
+        format!(
+            "{} · {}/{} per 1M",
+            tier.label(),
+            format_usd(self.input_per_million),
+            format_usd(self.output_per_million)
+        )
+    }
+
+    pub fn estimate_cost(self, input_tokens: u64, output_tokens: u64) -> f64 {
+        (input_tokens as f64 / 1_000_000.0) * self.input_per_million
+            + (output_tokens as f64 / 1_000_000.0) * self.output_per_million
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelInfo {
+    pub id: String,
+    pub pricing: Option<ModelPricing>,
+}
+
+impl ModelInfo {
+    pub fn display_label(&self) -> String {
+        match self.pricing {
+            Some(pricing) => format!("{} ({})", self.id, pricing.format_label()),
+            None => self.id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SessionUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reported_cost_usd: f64,
+    pub has_reported_cost: bool,
+}
+
 pub struct Router {
     routes: Vec<Settings>,
     agent: Agent,
     counter: AtomicU64,
+    input_tokens: AtomicU64,
+    output_tokens: AtomicU64,
+    reported_cost_nanodollars: AtomicU64,
+    reported_cost_calls: AtomicU64,
 }
 
 impl Router {
@@ -24,6 +108,10 @@ impl Router {
             routes,
             agent,
             counter: AtomicU64::new(1),
+            input_tokens: AtomicU64::new(0),
+            output_tokens: AtomicU64::new(0),
+            reported_cost_nanodollars: AtomicU64::new(0),
+            reported_cost_calls: AtomicU64::new(0),
         }
     }
 
@@ -42,15 +130,25 @@ impl Router {
             .collect()
     }
 
-    pub fn available_models(&self) -> Result<Vec<String>, String> {
+    pub fn available_models(&self) -> Result<Vec<ModelInfo>, String> {
         let route = self.primary();
-        fetch_model_ids(
+        fetch_models(
             &route.base_url,
             route.auth,
             &route.api_key,
             &route.headers,
             route.timeout,
         )
+    }
+
+    pub fn usage(&self) -> SessionUsage {
+        SessionUsage {
+            input_tokens: self.input_tokens.load(Ordering::Relaxed),
+            output_tokens: self.output_tokens.load(Ordering::Relaxed),
+            reported_cost_usd: self.reported_cost_nanodollars.load(Ordering::Relaxed) as f64
+                / 1_000_000_000.0,
+            has_reported_cost: self.reported_cost_calls.load(Ordering::Relaxed) > 0,
+        }
     }
 
     /// Route a model call through the primary and any fallback routes.
@@ -159,9 +257,53 @@ impl Router {
     }
 
     fn parse_response(&self, protocol: Protocol, data: &Value) -> Result<Vec<Block>, String> {
-        match protocol {
-            Protocol::Anthropic => self.parse_anthropic(data),
-            Protocol::OpenAi => self.parse_openai(data),
+        let blocks = match protocol {
+            Protocol::Anthropic => self.parse_anthropic(data)?,
+            Protocol::OpenAi => self.parse_openai(data)?,
+        };
+        self.record_usage(protocol, data);
+        Ok(blocks)
+    }
+
+    fn record_usage(&self, protocol: Protocol, data: &Value) {
+        let Some(usage) = data.get("usage") else {
+            return;
+        };
+        let (input, output) = match protocol {
+            Protocol::Anthropic => (
+                usage
+                    .get("input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                usage
+                    .get("output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            ),
+            Protocol::OpenAi => (
+                usage
+                    .get("prompt_tokens")
+                    .and_then(Value::as_u64)
+                    .or_else(|| usage.get("input_tokens").and_then(Value::as_u64))
+                    .unwrap_or(0),
+                usage
+                    .get("completion_tokens")
+                    .and_then(Value::as_u64)
+                    .or_else(|| usage.get("output_tokens").and_then(Value::as_u64))
+                    .unwrap_or(0),
+            ),
+        };
+        if input > 0 {
+            self.input_tokens.fetch_add(input, Ordering::Relaxed);
+        }
+        if output > 0 {
+            self.output_tokens.fetch_add(output, Ordering::Relaxed);
+        }
+        if let Some(cost) = usage.get("cost").and_then(parse_non_negative_f64) {
+            let nanodollars = (cost * 1_000_000_000.0).round() as u64;
+            self.reported_cost_nanodollars
+                .fetch_add(nanodollars, Ordering::Relaxed);
+            self.reported_cost_calls.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -303,13 +445,13 @@ fn value_type(value: &Value) -> &'static str {
     }
 }
 
-pub fn fetch_model_ids(
+pub fn fetch_models(
     base_url: &str,
     auth: Auth,
     api_key: &str,
     headers: &[(String, String)],
     timeout: Duration,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<ModelInfo>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let mut request = agent.get(&url).set("accept", "application/json");
@@ -331,28 +473,83 @@ pub fn fetch_model_ids(
     let data: Value = response
         .into_json()
         .map_err(|err| format!("invalid model-list JSON from provider: {err}"))?;
+    parse_model_list(&data)
+}
+
+pub fn parse_model_list(data: &Value) -> Result<Vec<ModelInfo>, String> {
     let entries = data
         .as_array()
         .or_else(|| data.get("data").and_then(Value::as_array))
         .or_else(|| data.get("models").and_then(Value::as_array))
         .ok_or_else(|| "provider response did not contain a model list".to_string())?;
 
-    let mut models: Vec<String> = entries
+    let mut models: Vec<ModelInfo> = entries
         .iter()
         .filter_map(|entry| {
-            entry
+            let id = entry
                 .as_str()
                 .or_else(|| entry.get("id").and_then(Value::as_str))
-                .or_else(|| entry.get("name").and_then(Value::as_str))
-                .map(str::to_string)
+                .or_else(|| entry.get("name").and_then(Value::as_str))?
+                .to_string();
+            let pricing = entry.get("pricing").and_then(parse_model_pricing);
+            Some(ModelInfo { id, pricing })
         })
         .collect();
-    models.sort();
-    models.dedup();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|later, kept| {
+        if later.id == kept.id {
+            if kept.pricing.is_none() {
+                kept.pricing = later.pricing;
+            }
+            true
+        } else {
+            false
+        }
+    });
     if models.is_empty() {
         return Err("provider returned no model IDs".to_string());
     }
     Ok(models)
+}
+
+fn parse_model_pricing(pricing: &Value) -> Option<ModelPricing> {
+    let input_per_token = pricing
+        .get("prompt")
+        .or_else(|| pricing.get("input"))
+        .and_then(parse_non_negative_f64)?;
+    let output_per_token = pricing
+        .get("completion")
+        .or_else(|| pricing.get("output"))
+        .and_then(parse_non_negative_f64)?;
+    Some(ModelPricing {
+        input_per_million: input_per_token * 1_000_000.0,
+        output_per_million: output_per_token * 1_000_000.0,
+    })
+}
+
+fn parse_non_negative_f64(value: &Value) -> Option<f64> {
+    let parsed = match value {
+        Value::Number(num) => num.as_f64()?,
+        Value::String(text) => text.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    if parsed.is_finite() && parsed >= 0.0 {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+pub fn format_usd(amount: f64) -> String {
+    if amount == 0.0 {
+        return "$0".to_string();
+    }
+    if amount < 0.01 {
+        let formatted = format!("{amount:.4}");
+        let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+        return format!("${trimmed}");
+    }
+    format!("${amount:.2}")
 }
 
 fn apply_auth(request: ureq::Request, auth: Auth, api_key: &str) -> ureq::Request {
@@ -496,5 +693,79 @@ mod tests {
         );
         assert_eq!(extract_error(r#"{"message": "bad model"}"#), "bad model");
         assert_eq!(extract_error("plain failure"), "plain failure");
+    }
+
+    #[test]
+    fn parses_model_list_with_pricing_and_skips_negative() {
+        let data = json!({
+            "data": [
+                {
+                    "id": "anthropic/claude-sonnet-4.5",
+                    "pricing": {"prompt": "0.000003", "completion": "0.000015"}
+                },
+                {
+                    "id": "meta-llama/free-model",
+                    "pricing": {"prompt": "0", "completion": "0"}
+                },
+                {
+                    "id": "openrouter/auto",
+                    "pricing": {"prompt": "-1", "completion": "-1"}
+                },
+                {
+                    "id": "plain-model"
+                }
+            ]
+        });
+        let models = parse_model_list(&data).unwrap();
+        assert_eq!(models.len(), 4);
+        assert_eq!(models[0].id, "anthropic/claude-sonnet-4.5");
+        assert_eq!(
+            models[0].pricing,
+            Some(ModelPricing {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+            })
+        );
+        assert_eq!(
+            models[0].display_label(),
+            "anthropic/claude-sonnet-4.5 (standard · $3.00/$15.00 per 1M)"
+        );
+        assert_eq!(models[1].display_label(), "meta-llama/free-model (free)");
+        assert_eq!(models[2].pricing, None);
+        assert_eq!(models[3].pricing, None);
+    }
+
+    #[test]
+    fn formats_small_and_standard_pricing_labels() {
+        let small = ModelPricing {
+            input_per_million: 0.0025,
+            output_per_million: 0.01,
+        };
+        assert_eq!(small.format_label(), "cheap · $0.0025/$0.01 per 1M");
+        let expensive = ModelPricing {
+            input_per_million: 15.0,
+            output_per_million: 75.0,
+        };
+        assert_eq!(expensive.tier(), CostTier::Expensive);
+        assert_eq!(expensive.format_label(), "expensive · $15.00/$75.00 per 1M");
+        assert!((small.estimate_cost(1_000_000, 500_000) - 0.0075).abs() < 1e-9);
+    }
+
+    #[test]
+    fn records_anthropic_and_openai_usage_and_cost() {
+        let router = router();
+        router.record_usage(
+            Protocol::Anthropic,
+            &json!({"usage": {"input_tokens": 120, "output_tokens": 30}}),
+        );
+        router.record_usage(
+            Protocol::OpenAi,
+            &json!({"usage": {"prompt_tokens": 80, "completion_tokens": 20, "cost": 0.0015}}),
+        );
+        let usage = router.usage();
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.output_tokens, 50);
+        assert!(usage.has_reported_cost);
+        assert!((usage.reported_cost_usd - 0.0015).abs() < 1e-9);
     }
 }

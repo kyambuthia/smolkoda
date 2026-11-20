@@ -121,7 +121,8 @@ and `fallbacks` (profile names tried in order for retryable failures).
 ## Commands
 
 - `/provider [name]` — open a scrollable provider picker or switch by name (opens setup if a key is missing)
-- `/model [name]` — open a scrollable model picker or set the model directly
+- `/model [name]` — open a scrollable model picker (with pricing/cost tier when available) or set the model directly
+- `/cost` — show session token usage and estimated or reported cost
 - `/config` — show the active route
 - `/feed` or `/timeline` — show the feed timeline
 - `/tools` — list tools

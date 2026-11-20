@@ -316,11 +316,15 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                         let current = looper.router.primary().model.clone();
                         let selected = models
                             .iter()
-                            .position(|model| model == &current)
+                            .position(|model| model.id == current)
                             .unwrap_or(0);
                         if ui::can_select() {
-                            if let Some(index) = ui::select("Choose a model", &models, selected) {
-                                set_model(looper, config, path, &models[index]);
+                            let labels: Vec<String> = models
+                                .iter()
+                                .map(router::ModelInfo::display_label)
+                                .collect();
+                            if let Some(index) = ui::select("Choose a model", &labels, selected) {
+                                set_model(looper, config, path, &models[index].id);
                             }
                         } else {
                             println!(
@@ -329,8 +333,8 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                                 ui::reset()
                             );
                             for model in &models {
-                                let marker = if model == &current { "*" } else { " " };
-                                println!("  {} {}", marker, model);
+                                let marker = if model.id == current { "*" } else { " " };
+                                println!("  {} {}", marker, model.display_label());
                             }
                             println!("Set one with: /model MODEL_ID");
                         }
@@ -340,6 +344,10 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                 continue;
             }
             set_model(looper, config, path, argument);
+            continue;
+        }
+        if line == "/cost" {
+            print_cost(&looper.router);
             continue;
         }
         if line.starts_with('/') {
@@ -504,10 +512,42 @@ fn print_feed(feed: &Feed) {
     }
 }
 
+fn print_cost(router: &Router) {
+    let route = router.primary();
+    let usage = router.usage();
+    println!("  provider: {}", route.name);
+    println!("  model:    {}", route.model);
+    println!(
+        "  tokens:   {} in / {} out",
+        usage.input_tokens, usage.output_tokens
+    );
+    if usage.has_reported_cost {
+        println!(
+            "  cost:     {}",
+            router::format_usd(usage.reported_cost_usd)
+        );
+        return;
+    }
+    if let Ok(models) = router.available_models() {
+        if let Some(pricing) = models
+            .into_iter()
+            .find(|model| model.id == route.model)
+            .and_then(|model| model.pricing)
+        {
+            println!("  rate:     {}", pricing.format_label());
+            let estimated = pricing.estimate_cost(usage.input_tokens, usage.output_tokens);
+            println!("  cost:     ~{}", router::format_usd(estimated));
+            return;
+        }
+    }
+    println!("  cost:     unavailable (provider did not report pricing)");
+}
+
 fn print_help() {
     println!("{}Commands{}", ui::bold(), ui::reset());
     println!("  /provider [name]  open provider picker or switch");
     println!("  /model [name]     choose a model or set its ID");
+    println!("  /cost             show session token usage and cost");
     println!("  /config           show active route");
     println!("  /feed, /timeline  show the feed timeline");
     println!("  /tools            list tools");
