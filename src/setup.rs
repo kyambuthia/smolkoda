@@ -4,7 +4,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::{self, Config};
-use crate::feed::Feed;
 use crate::presets::{self, Auth, Protocol, PRESETS};
 use crate::router::Router;
 use crate::ui;
@@ -371,34 +370,8 @@ fn test_profile(config: &Config, name: &str) {
             return;
         }
     };
-    let route_name = settings.name.clone();
-    let endpoint = config::endpoint(&settings);
-    ui::info(&format!("testing {route_name} -> {endpoint} ..."));
     let router = Router::new(vec![settings]);
-    let mut feed = Feed::default();
-    feed.push_user("Reply with exactly: OK");
-    match router.complete_with_tools(&feed, "", Some(32), false) {
-        Ok(blocks) => {
-            let text = blocks
-                .iter()
-                .filter_map(|block| match block {
-                    crate::feed::Block::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!(
-                "{}connected{}",
-                ui::green(),
-                if text.is_empty() {
-                    String::new()
-                } else {
-                    format!(" - {}", text.chars().take(80).collect::<String>())
-                }
-            );
-        }
-        Err(err) => ui::error(&format!("connection failed: {err}")),
-    }
+    crate::test_connection(&router);
 }
 
 pub fn ask(prompt: &str, default: Option<&str>) -> Option<String> {

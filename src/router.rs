@@ -140,15 +140,7 @@ impl Router {
         for (header, value) in &route.headers {
             request = request.set(header, value);
         }
-        if !route.api_key.is_empty() {
-            let value = format!("Bearer {}", route.api_key);
-            request = match route.auth {
-                Auth::Bearer => request.set("authorization", &value),
-                Auth::ApiKey => request.set("api-key", &route.api_key),
-                Auth::XApiKey => request.set("x-api-key", &route.api_key),
-                Auth::None => request,
-            };
-        }
+        request = apply_auth(request, route.auth, &route.api_key);
 
         let response = match request.send_json(body) {
             Ok(response) => response,
@@ -324,15 +316,7 @@ pub fn fetch_model_ids(
     for (header, value) in headers {
         request = request.set(header, value);
     }
-    if !api_key.is_empty() {
-        let value = format!("Bearer {api_key}");
-        request = match auth {
-            Auth::Bearer => request.set("authorization", &value),
-            Auth::ApiKey => request.set("api-key", api_key),
-            Auth::XApiKey => request.set("x-api-key", api_key),
-            Auth::None => request,
-        };
-    }
+    request = apply_auth(request, auth, api_key);
 
     let response = match request.call() {
         Ok(response) => response,
@@ -371,6 +355,18 @@ pub fn fetch_model_ids(
     Ok(models)
 }
 
+fn apply_auth(request: ureq::Request, auth: Auth, api_key: &str) -> ureq::Request {
+    if api_key.is_empty() {
+        return request;
+    }
+    match auth {
+        Auth::Bearer => request.set("authorization", &format!("Bearer {api_key}")),
+        Auth::ApiKey => request.set("api-key", api_key),
+        Auth::XApiKey => request.set("x-api-key", api_key),
+        Auth::None => request,
+    }
+}
+
 fn is_retryable(error: &str) -> bool {
     error.starts_with("HTTP 429")
         || error.starts_with("HTTP 5")
@@ -378,7 +374,7 @@ fn is_retryable(error: &str) -> bool {
         || error.contains("timed out")
 }
 
-fn extract_error(body: &str) -> String {
+pub(crate) fn extract_error(body: &str) -> String {
     if let Ok(data) = serde_json::from_str::<Value>(body) {
         if let Some(message) = data.pointer("/error/message").and_then(Value::as_str) {
             return message.to_string();

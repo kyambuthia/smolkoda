@@ -165,7 +165,7 @@ fn build_router(settings: &Settings, config: &Config) -> Router {
     Router::new(routes)
 }
 
-fn test_connection(router: &Router) -> bool {
+pub(crate) fn test_connection(router: &Router) -> bool {
     let settings = router.primary();
     ui::info(&format!(
         "testing {} -> {} ...",

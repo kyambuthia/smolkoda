@@ -291,15 +291,6 @@ fn play_audio(audio: &[u8]) -> Result<(), String> {
 
 fn api_error(action: &str, code: u16, response: ureq::Response) -> String {
     let body = response.into_string().unwrap_or_default();
-    let detail = serde_json::from_str::<Value>(&body)
-        .ok()
-        .and_then(|data| {
-            data.pointer("/error/message")
-                .and_then(Value::as_str)
-                .or_else(|| data.get("message").and_then(Value::as_str))
-                .or_else(|| data.get("error").and_then(Value::as_str))
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| body.chars().take(500).collect());
+    let detail = crate::router::extract_error(&body);
     format!("{action} failed with HTTP {code}: {detail}")
 }
