@@ -182,7 +182,8 @@ pub fn select(prompt: &str, items: &[String], initial: usize) -> Option<usize> {
                     KeyCode::Home => state.home(),
                     KeyCode::End => state.end(),
                     KeyCode::Enter => return Some(state.selected),
-                    KeyCode::Esc | KeyCode::Char('q') => return None,
+                    KeyCode::Esc => return None,
+                    KeyCode::Char('q') if key.modifiers.is_empty() => return None,
                     _ => {}
                 }
             }
@@ -288,7 +289,7 @@ fn render_select(
 ) -> io::Result<()> {
     let (width, height) = terminal::size()?;
     let width = usize::from(width).max(1);
-    let height = usize::from(height).max(4);
+    let height = usize::from(height).max(1);
     let content_width = width.saturating_sub(1).max(1);
     let viewport = height.saturating_sub(2).max(1);
 
@@ -325,7 +326,7 @@ fn render_select(
         }
     }
 
-    let footer_y = (height - 1) as u16;
+    let footer_y = height.saturating_sub(1).min(usize::from(u16::MAX)) as u16;
     queue!(
         stdout,
         MoveTo(0, footer_y),
