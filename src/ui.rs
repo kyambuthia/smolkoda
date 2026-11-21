@@ -98,11 +98,7 @@ pub fn dither_frame(t_ms: u64, width: usize, kind: AnimKind, utf8: bool) -> Stri
     let ramp: &[char] = if !utf8 {
         &[' ', '.', ':', '-', '=', '+', '*', '#']
     } else {
-        match kind {
-            AnimKind::Think => &[' ', '⠁', '⠃', '⠇', '⠏', '⠟', '⠿', '⣿'],
-            AnimKind::Tool | AnimKind::Fetch => &[' ', '░', '▒', '▓', '█'],
-            AnimKind::Voice => &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'],
-        }
+        &[' ', '·', '▫', '▪', '■']
     };
     let speed = match kind {
         AnimKind::Think => 70,
@@ -201,8 +197,6 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
         loop {
             let elapsed = start.elapsed();
             let t_ms = elapsed.as_millis() as u64;
-            let bar_width = if kind == AnimKind::Fetch { 14 } else { 10 };
-            let bar = dither_frame(t_ms, bar_width, kind, utf8);
             let width = terminal::size()
                 .map(|(w, _)| usize::from(w))
                 .unwrap_or(80)
@@ -213,10 +207,13 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
             } else {
                 String::new()
             };
-            let rest = clip_line(
-                &format!("{bg_label}{suffix}"),
-                width.saturating_sub(bar_width + 1),
-            );
+            let label_full = format!("{bg_label}{suffix}");
+            let label_max = (width / 2).max(12).min(width);
+            let label_clipped = clip_line(&label_full, label_max);
+            let label_trim = label_clipped.trim_end();
+            let label_len = label_trim.chars().count();
+            let bar_width = width.saturating_sub(label_len + 1);
+            let bar = dither_frame(t_ms, bar_width, kind, utf8);
 
             if let Ok(active) = STATUS_MUTEX.lock() {
                 if active.is_some() {
@@ -224,11 +221,11 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
                     let _ = write!(
                         err,
                         "\r{}{}{} {}{}{}\x1b[K",
+                        dim(),
+                        label_trim,
+                        reset(),
                         cyan(),
                         bar,
-                        reset(),
-                        dim(),
-                        rest.trim_end(),
                         reset()
                     );
                     let _ = err.flush();
