@@ -348,7 +348,10 @@ fn bash(args: &Value) -> Result<String, String> {
         }
         cmd
     };
+    // Never share the terminal's stdin: a command waiting for input would hang
+    // until the timeout and steal keystrokes from the prompt.
     let mut child = command_builder
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -590,6 +593,13 @@ mod tests {
         assert!(error.contains("'new'"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_does_not_inherit_stdin() {
+        let output = run("bash", &json!({"cmd": "cat; echo done", "timeout": 5})).unwrap();
+        assert_eq!(output, "done");
     }
 
     #[cfg(unix)]
