@@ -525,7 +525,15 @@ impl PromptDock {
                             let trimmed = submitted.trim();
                             if !trimmed.is_empty() {
                                 let glyph = if is_utf8_locale() { "›" } else { ">" };
-                                println!("\n{}{} {}{}", cyan(), glyph, reset(), sanitize(trimmed));
+                                println!(
+                                    "\n{}you {} {}{}{}{}",
+                                    cyan(),
+                                    glyph,
+                                    reset(),
+                                    bold(),
+                                    sanitize(trimmed),
+                                    reset()
+                                );
                                 if self.history.last().map(String::as_str) != Some(trimmed) {
                                     self.history.push(trimmed.to_string());
                                 }
