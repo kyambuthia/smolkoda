@@ -141,6 +141,10 @@ fn main() {
     let mut looper = Looper::new(router);
     if !args.prompt.is_empty() {
         let prompt = args.prompt.join(" ");
+        if prompt.trim().is_empty() {
+            ui::error("prompt cannot be empty");
+            std::process::exit(2);
+        }
         if let Err(err) = looper.run_turn(&prompt) {
             ui::error(&err);
             std::process::exit(1);
@@ -174,7 +178,7 @@ pub(crate) fn test_connection(router: &Router) -> bool {
     ));
     let mut feed = Feed::default();
     feed.push_user("Reply with exactly: OK");
-    match router.complete_with_tools(&feed, "", Some(32), false) {
+    match router.complete_with_tools(&feed, "", Some(256), false) {
         Ok(blocks) => {
             let text = blocks
                 .iter()
