@@ -1094,6 +1094,7 @@ impl PromptDock {
         let mut cursor = 0usize;
         let mut hist_idx: Option<usize> = None;
         let mut draft = String::new();
+        let mut last_ctrl_c = false;
 
         loop {
             let input: String = chars.iter().collect();
@@ -1106,8 +1107,26 @@ impl PromptDock {
                 Event::Resize(_, _) => {}
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        if !matches!(key.code, KeyCode::Char('c')) {
+                            last_ctrl_c = false;
+                        }
                         match key.code {
-                            KeyCode::Char('c') => return None,
+                            KeyCode::Char('c') => {
+                                if !chars.is_empty() {
+                                    chars.clear();
+                                    cursor = 0;
+                                    hist_idx = None;
+                                    last_ctrl_c = false;
+                                } else if last_ctrl_c {
+                                    return None;
+                                } else {
+                                    last_ctrl_c = true;
+                                    self.push(FeedEntry::Info {
+                                        text: "Press Ctrl-C again or Ctrl-D to exit.".to_string(),
+                                        is_error: false,
+                                    });
+                                }
+                            }
                             KeyCode::Char('d') if chars.is_empty() => return None,
                             KeyCode::Char('a') => cursor = 0,
                             KeyCode::Char('e') => cursor = chars.len(),
@@ -1122,6 +1141,7 @@ impl PromptDock {
                         }
                         continue;
                     }
+                    last_ctrl_c = false;
                     match key.code {
                         KeyCode::Enter => {
                             let submitted: String = chars.iter().collect();

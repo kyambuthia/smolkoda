@@ -226,7 +226,7 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if line.is_empty() {
             continue;
         }
-        if line == "/quit" {
+        if line == "/quit" || line == "/exit" {
             break;
         }
         if line == "/clear" {
@@ -254,7 +254,14 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
             continue;
         }
         if line == "/config" {
-            print_config(&looper.router, path);
+            if dock.is_active() {
+                dock.push(ui::FeedEntry::Info {
+                    text: config_text(&looper.router, path),
+                    is_error: false,
+                });
+            } else {
+                print_config(&looper.router, path);
+            }
             continue;
         }
 
@@ -279,6 +286,7 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if let Some(rest) = line.strip_prefix("/provider") {
             let argument = rest.trim();
             let current = looper.router.primary().name.clone();
+            dock.suspend();
             let (target, force_setup) = if argument.is_empty() {
                 if ui::can_select() {
                     let (items, targets) = switch_provider_items(config, &current);
@@ -292,7 +300,10 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                             let reconfig = chosen == current;
                             (chosen, reconfig)
                         }
-                        None => continue,
+                        None => {
+                            dock.resume(&looper.router.primary().model);
+                            continue;
+                        }
                     }
                 } else {
                     print_providers(path, config);
@@ -301,7 +312,10 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                             let reconfig = value == current;
                             (value, reconfig)
                         }
-                        None => continue,
+                        None => {
+                            dock.resume(&looper.router.primary().model);
+                            continue;
+                        }
                     }
                 }
             } else if argument == "setup" {
@@ -312,9 +326,9 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                 (argument.to_string(), false)
             };
             if target.is_empty() {
+                dock.resume(&looper.router.primary().model);
                 continue;
             }
-            dock.suspend();
             let switched = if force_setup {
                 reconfigure_provider(&target, config, path)
             } else {
@@ -351,11 +365,14 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         if line == "/model" || line.starts_with("/model ") {
             let argument = line.strip_prefix("/model").unwrap_or("").trim();
             if argument.is_empty() {
-                match ui::busy(ui::AnimKind::Fetch, "fetching models", || {
+                dock.suspend();
+                let result = ui::busy(ui::AnimKind::Fetch, "fetching models", || {
                     looper.router.available_models()
-                }) {
+                });
+                let mut status_msg: Option<(String, bool)> = None;
+                match result {
                     Ok(models) if models.is_empty() => {
-                        ui::info("No models returned by the provider.");
+                        status_msg = Some(("No models returned by the provider.".to_string(), false));
                     }
                     Ok(models) => {
                         let current = looper.router.primary().model.clone();
@@ -367,27 +384,59 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                             if let Some(index) =
                                 ui::select_model("Choose a model", &models, selected)
                             {
-                                set_model(looper, config, path, &models[index].id);
-                                dock.redraw(&looper.router.primary().model);
+                                match set_model(looper, config, path, &models[index].id) {
+                                    Ok(msg) => status_msg = Some((msg, false)),
+                                    Err(err) => status_msg = Some((format!("error: {err}"), true)),
+                                }
                             }
                         } else {
-                            println!(
-                                "{}Models available from provider{}",
-                                ui::bold(),
-                                ui::reset()
-                            );
+                            let mut lines = vec!["Models available from provider:".to_string()];
                             for model in &models {
                                 let marker = if model.id == current { "*" } else { " " };
-                                println!("  {} {}", marker, model.display_label());
+                                lines.push(format!("  {} {}", marker, model.display_label()));
                             }
-                            println!("Set one with: /model MODEL_ID");
+                            lines.push("Set one with: /model MODEL_ID".to_string());
+                            status_msg = Some((lines.join("\n"), false));
                         }
                     }
-                    Err(err) => ui::error(&format!("could not load provider models: {err}")),
+                    Err(err) => {
+                        status_msg = Some((format!("could not load provider models: {err}"), true));
+                    }
+                }
+                dock.resume(&looper.router.primary().model);
+                if let Some((text, is_error)) = status_msg {
+                    if dock.is_active() {
+                        dock.push(ui::FeedEntry::Info { text, is_error });
+                    } else if is_error {
+                        eprintln!("{text}");
+                    } else {
+                        println!("{text}");
+                    }
                 }
                 continue;
             }
-            set_model(looper, config, path, argument);
+            match set_model(looper, config, path, argument) {
+                Ok(msg) => {
+                    if dock.is_active() {
+                        dock.push(ui::FeedEntry::Info {
+                            text: msg,
+                            is_error: false,
+                        });
+                    } else {
+                        println!("{}{}{}", ui::green(), msg, ui::reset());
+                    }
+                }
+                Err(err) => {
+                    if dock.is_active() {
+                        dock.push(ui::FeedEntry::Info {
+                            text: format!("error: {err}"),
+                            is_error: true,
+                        });
+                    } else {
+                        ui::error(&err);
+                    }
+                }
+            }
             continue;
         }
         if line == "/cost" {
@@ -457,7 +506,12 @@ fn switch_provider(name: &str, config: &mut Config, path: &Path) -> Result<Setti
     Ok(settings)
 }
 
-fn set_model(looper: &mut Looper, config: &mut Config, path: &Path, model: &str) {
+fn set_model(
+    looper: &mut Looper,
+    config: &mut Config,
+    path: &Path,
+    model: &str,
+) -> Result<String, String> {
     looper.router.primary_mut().model = model.to_string();
     let name = looper.router.primary().name.clone();
     let profile = config.providers.entry(name.clone()).or_insert_with(|| {
@@ -469,11 +523,8 @@ fn set_model(looper: &mut Looper, config: &mut Config, path: &Path, model: &str)
     });
     profile.model = Some(model.to_string());
     config.active = Some(name);
-    if let Err(err) = config::save_config(path, config) {
-        ui::error(&err);
-    } else {
-        println!("{}Model set to {}{}", ui::green(), model, ui::reset());
-    }
+    config::save_config(path, config)?;
+    Ok(format!("Model set to {model}"))
 }
 
 fn switch_provider_items(config: &Config, current: &str) -> (Vec<String>, Vec<String>) {
@@ -557,21 +608,28 @@ fn print_providers(path: &Path, config: &Config) {
     );
 }
 
-fn print_config(router: &Router, path: &Path) {
+fn config_text(router: &Router, path: &Path) -> String {
     let settings = router.primary();
-    println!("\n{}Active route{}", ui::bold(), ui::reset());
-    println!("  profile:  {}", settings.name);
-    println!("  protocol: {}", settings.protocol.as_str());
-    println!("  base url: {}", settings.base_url);
-    println!("  model:    {}", settings.model);
-    println!(
-        "  auth:     {} ({})",
-        settings.auth.as_str(),
-        config::mask_secret(&settings.api_key)
-    );
-    println!("  max toks: {}", settings.max_tokens);
-    println!("  routes:   {}", router.route_names().join(" -> "));
-    println!("  config:   {}", path.display());
+    [
+        "Active route".to_string(),
+        format!("  profile:  {}", settings.name),
+        format!("  protocol: {}", settings.protocol.as_str()),
+        format!("  base url: {}", settings.base_url),
+        format!("  model:    {}", settings.model),
+        format!(
+            "  auth:     {} ({})",
+            settings.auth.as_str(),
+            config::mask_secret(&settings.api_key)
+        ),
+        format!("  max toks: {}", settings.max_tokens),
+        format!("  routes:   {}", router.route_names().join(" -> ")),
+        format!("  config:   {}", path.display()),
+    ]
+    .join("\n")
+}
+
+fn print_config(router: &Router, path: &Path) {
+    println!("\n{}", config_text(router, path));
 }
 
 fn cost_text(router: &Router) -> String {
@@ -827,7 +885,7 @@ mod tests {
         };
         let mut looper = Looper::new(Router::new(vec![settings]));
 
-        set_model(&mut looper, &mut config, &path, "local-b");
+        set_model(&mut looper, &mut config, &path, "local-b").unwrap();
         let saved = config.providers.get("openai").unwrap();
         assert_eq!(saved.preset, None);
         assert_eq!(saved.model.as_deref(), Some("local-b"));
