@@ -17,6 +17,54 @@ use crate::router::{format_usd, CostTier, ModelInfo};
 
 static STATUS_MUTEX: Mutex<Option<String>> = Mutex::new(None);
 static FEED_QUIET: AtomicBool = AtomicBool::new(false);
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
+pub fn clear_interrupted() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+}
+
+#[cfg(unix)]
+extern "C" fn handle_sigint(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+pub struct SigintGuard {
+    #[cfg(unix)]
+    prev: libc::sigaction,
+}
+
+impl SigintGuard {
+    pub fn install() -> Self {
+        clear_interrupted();
+        #[cfg(unix)]
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = handle_sigint as *const () as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = 0;
+            let mut prev: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGINT, &sa, &mut prev);
+            Self { prev }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+}
+
+impl Drop for SigintGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::sigaction(libc::SIGINT, &self.prev, std::ptr::null_mut());
+        }
+    }
+}
 
 pub fn set_feed_quiet(quiet: bool) {
     FEED_QUIET.store(quiet, Ordering::Relaxed);
@@ -172,6 +220,9 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
         drop(guard);
 
         loop {
+            if is_interrupted() {
+                break;
+            }
             let elapsed = start.elapsed();
             let t_ms = elapsed.as_millis() as u64;
             let width = terminal::size()
@@ -1030,6 +1081,10 @@ impl PromptDock {
             }
         }
 
+        #[cfg(unix)]
+        unsafe {
+            libc::tcflush(0, libc::TCIFLUSH);
+        }
         if terminal::enable_raw_mode().is_err() {
             return None;
         }

@@ -333,6 +333,11 @@ fn bash(args: &Value) -> Result<String, String> {
     } else {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&command);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         cmd
     };
     let mut child = command_builder
@@ -382,10 +387,17 @@ fn bash(args: &Value) -> Result<String, String> {
     };
 
     loop {
+        if crate::ui::is_interrupted() {
+            kill_child(&mut child);
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err("interrupted".to_string());
+        }
         let now = Instant::now();
         if now >= deadline {
             timed_out = true;
-            let _ = child.kill();
+            kill_child(&mut child);
             break;
         }
         match receiver.recv_timeout((deadline - now).min(Duration::from_millis(100))) {
@@ -428,6 +440,14 @@ fn truncate(text: &str) -> String {
     }
     let kept: String = text.chars().take(MAX_TOOL_CHARS).collect();
     format!("{kept}\n... truncated")
+}
+
+fn kill_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
 }
 
 #[cfg(test)]

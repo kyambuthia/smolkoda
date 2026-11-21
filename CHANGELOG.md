@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Add CI for formatting, Clippy, tests, and the declared Rust 1.88 MSRV.
 - Add contributor, security, and agent guidance plus build/test documentation.
 - Add tests for provider configuration, response parsing, and file tools.
 - Add scrollable terminal pickers for provider and model selection.
 - Add `opencode` (OpenCode Zen) provider preset with `cost.text` pricing support.
+- Add pinned bottom `PromptDock` with scrollable `FeedView`, collapsible tool bursts, square-wave status animation, and clean `Ctrl-C` interrupt handling.
 - Consolidate model selection under `/model`; the separate `/models` command is removed.
 - Show model pricing and cost tiers (`free`, `cheap`, `standard`, `expensive`) in setup and `/model` when provided by `/models`, and add `/cost` for session token usage and cost.
 - Use the operating system certificate store for HTTPS provider connections.

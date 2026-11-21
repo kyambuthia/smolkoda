@@ -48,15 +48,22 @@ impl Looper {
         input: &str,
         mut dock: Option<&mut ui::PromptDock>,
     ) -> Result<String, String> {
+        let _sigint = ui::SigintGuard::install();
         let start_usage = self.router.usage();
         let mut working = self.feed.clone();
         working.push_user(input);
         let system = system_prompt();
 
         for _step in 1..=self.max_steps {
+            if ui::is_interrupted() {
+                return Err("interrupted".to_string());
+            }
             let blocks = ui::busy(ui::AnimKind::Think, "thinking", || {
                 self.router.complete(&working, &system, None)
             })?;
+            if ui::is_interrupted() {
+                return Err("interrupted".to_string());
+            }
             if blocks.is_empty() {
                 if let Some(d) = dock.as_deref_mut() {
                     d.push(ui::FeedEntry::Assistant {
