@@ -194,6 +194,7 @@ impl Router {
         include_tools: bool,
     ) -> Result<Vec<Block>, String> {
         const MAX_ROUTE_RETRIES: u32 = 2;
+        const MAX_RATE_LIMIT_RETRIES: u32 = 4;
         let mut errors = Vec::new();
         for (index, route) in self.routes.iter().enumerate() {
             let mut attempt = 0;
@@ -205,9 +206,22 @@ impl Router {
                     Ok(blocks) => return Ok(blocks),
                     Err((err, retry_after)) => {
                         let retryable = is_retryable(&err);
-                        if retryable && attempt < MAX_ROUTE_RETRIES {
-                            let delay = retry_delay(attempt, retry_after);
+                        let is_rate_limit = err.starts_with("HTTP 429");
+                        let max_retries = if is_rate_limit {
+                            MAX_RATE_LIMIT_RETRIES
+                        } else {
+                            MAX_ROUTE_RETRIES
+                        };
+                        if retryable && attempt < max_retries {
+                            let delay = retry_delay(attempt, retry_after, is_rate_limit);
                             attempt += 1;
+                            if is_rate_limit {
+                                eprintln!(
+                                    "rate limited by {}, retrying in {}s...",
+                                    route.name,
+                                    delay.as_secs()
+                                );
+                            }
                             if sleep_interruptible(delay) {
                                 return Err("interrupted".to_string());
                             }
@@ -369,6 +383,7 @@ impl Router {
                     let id = block
                         .get("id")
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
                         .map(str::to_string)
                         .unwrap_or_else(|| self.next_id("call"));
                     let name = block
@@ -423,6 +438,7 @@ impl Router {
                 let id = call
                     .get("id")
                     .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
                     .map(str::to_string)
                     .unwrap_or_else(|| self.next_id("call"));
                 let function = call.get("function");
@@ -433,6 +449,7 @@ impl Router {
                     .to_string();
                 let raw_args = function.and_then(|function| function.get("arguments"));
                 let (input, parse_error) = match raw_args {
+                    Some(Value::String(text)) if text.trim().is_empty() => (json!({}), None),
                     Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
                         Ok(value) => normalize_input(value),
                         Err(err) => (
@@ -709,11 +726,17 @@ fn parse_retry_after(header: Option<&str>) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
-        .map(|secs| secs.clamp(1, 15))
+        .map(|secs| secs.clamp(1, 60))
 }
 
-fn retry_delay(attempt: u32, retry_after: Option<u64>) -> Duration {
-    let secs = retry_after.unwrap_or_else(|| (1u64 << attempt).min(8));
+fn retry_delay(attempt: u32, retry_after: Option<u64>, is_rate_limit: bool) -> Duration {
+    let secs = retry_after.unwrap_or_else(|| {
+        if is_rate_limit {
+            (2u64 << attempt).min(30)
+        } else {
+            (1u64 << attempt).min(8)
+        }
+    });
     Duration::from_secs(secs)
 }
 
