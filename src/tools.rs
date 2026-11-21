@@ -204,11 +204,8 @@ fn write(args: &Value) -> Result<String, String> {
 fn edit(args: &Value) -> Result<String, String> {
     let path = path_arg(args, "path")?;
     let old = string_arg(args, "old")?;
-    let new = args
-        .get("new")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    // `new` is required: silently treating a missing value as "" would delete text.
+    let new = string_arg(args, "new")?;
     let replace_all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
     if old.is_empty() {
         return Err("old string is empty".to_string());
@@ -566,6 +563,21 @@ mod tests {
 
         let output = run("bash", &json!({"cmd": "exit 7"})).unwrap();
         assert!(output.contains("(exit code 7)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_requires_new_argument() {
+        let dir = temp_dir("edit-missing-new");
+        let path = dir.join("file.txt");
+        fs::write(&path, "keep me").unwrap();
+        let error = run(
+            "edit",
+            &json!({"path": path.to_string_lossy(), "old": "keep"}),
+        )
+        .unwrap_err();
+        assert!(error.contains("'new'"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
         let _ = fs::remove_dir_all(&dir);
     }
 }
