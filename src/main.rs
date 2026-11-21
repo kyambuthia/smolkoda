@@ -102,7 +102,7 @@ fn main() {
 
     if settings.auth != Auth::None && settings.api_key.is_empty() {
         ui::warn(&format!("No API key for '{}'.", settings.name));
-        if io::stdin().is_terminal() {
+        if io::stdin().is_terminal() && !args.test && args.prompt.is_empty() {
             match setup::setup_wizard(&mut config, &path, Some(&settings.name)) {
                 Ok(true) => {}
                 Ok(false) => std::process::exit(1),
@@ -715,18 +715,13 @@ fn parse_args_from(mut iter: impl Iterator<Item = String>) -> Result<Args, Strin
             "--protocol" => args.protocol = Some(next_value(&mut iter, "--protocol")?),
             "--auth" => args.auth = Some(next_value(&mut iter, "--auth")?),
             "--max-tokens" => {
-                args.max_tokens = Some(
-                    next_value(&mut iter, "--max-tokens")?
-                        .parse()
-                        .map_err(|_| "--max-tokens must be a number".to_string())?,
-                )
+                args.max_tokens = Some(parse_positive_u32(&next_value(&mut iter, "--max-tokens")?)?)
             }
             "--temperature" => {
-                args.temperature = Some(
-                    next_value(&mut iter, "--temperature")?
-                        .parse()
-                        .map_err(|_| "--temperature must be a number".to_string())?,
-                )
+                args.temperature = Some(parse_non_negative_f64(&next_value(
+                    &mut iter,
+                    "--temperature",
+                )?)?)
             }
             "--config" => args.config = Some(next_value(&mut iter, "--config")?),
             _ => {
@@ -743,17 +738,9 @@ fn parse_args_from(mut iter: impl Iterator<Item = String>) -> Result<Args, Strin
                 } else if let Some(value) = arg.strip_prefix("--auth=") {
                     args.auth = Some(value.to_string());
                 } else if let Some(value) = arg.strip_prefix("--max-tokens=") {
-                    args.max_tokens = Some(
-                        value
-                            .parse()
-                            .map_err(|_| "--max-tokens must be a number".to_string())?,
-                    );
+                    args.max_tokens = Some(parse_positive_u32(value)?);
                 } else if let Some(value) = arg.strip_prefix("--temperature=") {
-                    args.temperature = Some(
-                        value
-                            .parse()
-                            .map_err(|_| "--temperature must be a number".to_string())?,
-                    );
+                    args.temperature = Some(parse_non_negative_f64(value)?);
                 } else if let Some(value) = arg.strip_prefix("--config=") {
                     args.config = Some(value.to_string());
                 } else if arg.starts_with('-') {
@@ -765,6 +752,26 @@ fn parse_args_from(mut iter: impl Iterator<Item = String>) -> Result<Args, Strin
         }
     }
     Ok(args)
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    let n: u32 = value
+        .parse()
+        .map_err(|_| "--max-tokens must be a positive integer".to_string())?;
+    if n == 0 {
+        return Err("--max-tokens must be greater than 0".to_string());
+    }
+    Ok(n)
+}
+
+fn parse_non_negative_f64(value: &str) -> Result<f64, String> {
+    let t: f64 = value
+        .parse()
+        .map_err(|_| "--temperature must be a finite non-negative number".to_string())?;
+    if !t.is_finite() || t < 0.0 {
+        return Err("--temperature must be a finite non-negative number".to_string());
+    }
+    Ok(t)
 }
 
 fn next_value(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -825,5 +832,22 @@ mod tests {
         assert_eq!(saved.preset, None);
         assert_eq!(saved.model.as_deref(), Some("local-b"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_args_validates_max_tokens_and_temperature() {
+        assert!(parse_args_from(["--max-tokens", "0"].into_iter().map(str::to_string)).is_err());
+        assert!(parse_args_from(["--max-tokens=0"].into_iter().map(str::to_string)).is_err());
+        assert!(parse_args_from(["--temperature", "nan"].into_iter().map(str::to_string)).is_err());
+        assert!(parse_args_from(["--temperature=inf"].into_iter().map(str::to_string)).is_err());
+        assert!(parse_args_from(["--temperature", "-0.5"].into_iter().map(str::to_string)).is_err());
+        let ok = parse_args_from(
+            ["--max-tokens", "128", "--temperature", "0.0"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(ok.max_tokens, Some(128));
+        assert_eq!(ok.temperature, Some(0.0));
     }
 }
