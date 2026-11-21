@@ -193,14 +193,30 @@ impl Router {
         max_tokens: Option<u32>,
         include_tools: bool,
     ) -> Result<Vec<Block>, String> {
+        const MAX_ROUTE_RETRIES: u32 = 2;
         let mut errors = Vec::new();
         for (index, route) in self.routes.iter().enumerate() {
-            match self.complete_route(route, feed, system, max_tokens, include_tools) {
-                Ok(blocks) => return Ok(blocks),
-                Err(err) => {
-                    let retryable = is_retryable(&err);
-                    errors.push(format!("{}: {err}", route.name));
-                    if !retryable || index + 1 == self.routes.len() {
+            let mut attempt = 0;
+            loop {
+                if crate::ui::is_interrupted() {
+                    return Err("interrupted".to_string());
+                }
+                match self.complete_route(route, feed, system, max_tokens, include_tools) {
+                    Ok(blocks) => return Ok(blocks),
+                    Err((err, retry_after)) => {
+                        let retryable = is_retryable(&err);
+                        if retryable && attempt < MAX_ROUTE_RETRIES {
+                            let delay = retry_delay(attempt, retry_after);
+                            attempt += 1;
+                            if sleep_interruptible(delay) {
+                                return Err("interrupted".to_string());
+                            }
+                            continue;
+                        }
+                        errors.push(format!("{}: {err}", route.name));
+                        if !retryable || index + 1 == self.routes.len() {
+                            return Err(errors.join(" | "));
+                        }
                         break;
                     }
                 }
@@ -216,7 +232,7 @@ impl Router {
         system: &str,
         max_tokens: Option<u32>,
         include_tools: bool,
-    ) -> Result<Vec<Block>, String> {
+    ) -> Result<Vec<Block>, (String, Option<u64>)> {
         let url = endpoint(route);
         let token_limit = max_tokens.unwrap_or(route.max_tokens);
         let mut body = match route.protocol {
@@ -268,17 +284,19 @@ impl Router {
         let response = match request.send_json(body) {
             Ok(response) => response,
             Err(ureq::Error::Status(code, response)) => {
+                let retry_after = parse_retry_after(response.header("retry-after"));
                 let body = response.into_string().unwrap_or_default();
-                return Err(format_http_error(code, &body));
+                return Err((format_http_error(code, &body), retry_after));
             }
             Err(ureq::Error::Transport(err)) => {
-                return Err(format!("connection failed: {err}"));
+                return Err((format!("connection failed: {err}"), None));
             }
         };
         let data: Value = response
             .into_json()
-            .map_err(|err| format!("invalid JSON from provider: {err}"))?;
+            .map_err(|err| (format!("invalid JSON from provider: {err}"), None))?;
         self.parse_response(route.protocol, &data)
+            .map_err(|err| (err, None))
     }
 
     fn parse_response(&self, protocol: Protocol, data: &Value) -> Result<Vec<Block>, String> {
@@ -684,6 +702,31 @@ fn apply_auth(request: ureq::Request, auth: Auth, api_key: &str) -> ureq::Reques
         Auth::XApiKey => request.set("x-api-key", api_key),
         Auth::None => request,
     }
+}
+
+fn parse_retry_after(header: Option<&str>) -> Option<u64> {
+    header?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|secs| secs.clamp(1, 15))
+}
+
+fn retry_delay(attempt: u32, retry_after: Option<u64>) -> Duration {
+    let secs = retry_after.unwrap_or_else(|| (1u64 << attempt).min(8));
+    Duration::from_secs(secs)
+}
+
+fn sleep_interruptible(total: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < total {
+        if crate::ui::is_interrupted() {
+            return true;
+        }
+        let remaining = total.saturating_sub(start.elapsed());
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+    crate::ui::is_interrupted()
 }
 
 fn is_retryable(error: &str) -> bool {
