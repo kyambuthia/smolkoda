@@ -59,7 +59,7 @@ impl Looper {
                 return Err("interrupted".to_string());
             }
             let blocks = ui::busy(ui::AnimKind::Think, "thinking", || {
-                self.router.complete(&working, &system, None)
+                complete_interruptible(&self.router, &working, &system)
             })?;
             if ui::is_interrupted() {
                 return Err("interrupted".to_string());
@@ -188,6 +188,32 @@ impl Looper {
             }
         } else {
             ui::print_turn_usage(turn_in, turn_out, turn_cost, session_cost);
+        }
+    }
+}
+
+fn complete_interruptible(
+    router: &Router,
+    feed: &Feed,
+    system: &str,
+) -> Result<Vec<Block>, String> {
+    let router = router.clone();
+    let feed = feed.clone();
+    let system = system.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(router.complete(&feed, &system, None));
+    });
+    loop {
+        if ui::is_interrupted() {
+            return Err("interrupted".to_string());
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("model worker exited unexpectedly".to_string());
+            }
         }
     }
 }

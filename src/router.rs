@@ -113,14 +113,15 @@ pub struct SessionUsage {
     pub has_reported_cost: bool,
 }
 
+#[derive(Clone)]
 pub struct Router {
     routes: Vec<Settings>,
     agent: Agent,
-    counter: AtomicU64,
-    input_tokens: AtomicU64,
-    output_tokens: AtomicU64,
-    reported_cost_nanodollars: AtomicU64,
-    reported_cost_calls: AtomicU64,
+    counter: std::sync::Arc<AtomicU64>,
+    input_tokens: std::sync::Arc<AtomicU64>,
+    output_tokens: std::sync::Arc<AtomicU64>,
+    reported_cost_nanodollars: std::sync::Arc<AtomicU64>,
+    reported_cost_calls: std::sync::Arc<AtomicU64>,
 }
 
 impl Router {
@@ -131,11 +132,11 @@ impl Router {
         Self {
             routes,
             agent,
-            counter: AtomicU64::new(1),
-            input_tokens: AtomicU64::new(0),
-            output_tokens: AtomicU64::new(0),
-            reported_cost_nanodollars: AtomicU64::new(0),
-            reported_cost_calls: AtomicU64::new(0),
+            counter: std::sync::Arc::new(AtomicU64::new(1)),
+            input_tokens: std::sync::Arc::new(AtomicU64::new(0)),
+            output_tokens: std::sync::Arc::new(AtomicU64::new(0)),
+            reported_cost_nanodollars: std::sync::Arc::new(AtomicU64::new(0)),
+            reported_cost_calls: std::sync::Arc::new(AtomicU64::new(0)),
         }
     }
 
