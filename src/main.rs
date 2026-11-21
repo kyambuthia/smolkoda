@@ -203,19 +203,19 @@ pub(crate) fn test_connection(router: &Router) -> bool {
 }
 
 fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
+    let mut dock = ui::PromptDock::new();
     {
         let settings = looper.router.primary();
         ui::banner(&settings.model, &settings.name, &config::endpoint(settings));
+        dock.redraw(&settings.model);
     }
 
     loop {
-        ui::prompt();
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-            println!();
+        let active_model = looper.router.primary().model.clone();
+        let Some(raw_line) = dock.read_line(&active_model) else {
             break;
-        }
-        let line = line.trim();
+        };
+        let line = raw_line.trim();
         if line.is_empty() {
             continue;
         }
@@ -325,6 +325,7 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
                                 ui::select_model("Choose a model", &models, selected)
                             {
                                 set_model(looper, config, path, &models[index].id);
+                                dock.redraw(&looper.router.primary().model);
                             }
                         } else {
                             println!(

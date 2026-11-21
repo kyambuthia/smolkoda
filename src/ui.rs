@@ -323,6 +323,291 @@ pub fn sanitize(text: &str) -> String {
     out
 }
 
+/// Slice `input` around `cursor` (char index) so it fits inside `max_width` columns,
+/// returning `(visible_text, cursor_column_offset)`.
+pub fn format_prompt_input(input: &str, cursor: usize, max_width: usize) -> (String, usize) {
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let start = if cursor >= max_width {
+        cursor + 1 - max_width
+    } else {
+        0
+    };
+    let end = (start + max_width).min(chars.len());
+    let visible: String = chars[start..end].iter().collect();
+    (visible, cursor - start)
+}
+
+/// Pinned bottom prompt region using an ANSI scroll region (`DECSTBM`) so the
+/// conversation feed flows upwards above it. Falls back to standard line input
+/// when not attached to an interactive TTY.
+pub struct PromptDock {
+    active: bool,
+    history: Vec<String>,
+}
+
+impl PromptDock {
+    pub fn new() -> Self {
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        let active = can_select() && height >= 8;
+        let dock = Self {
+            active,
+            history: Vec::new(),
+        };
+        if dock.active {
+            dock.apply_scroll_region(height);
+            dock.draw_box("", 0, "");
+            dock.park_in_feed(height);
+        }
+        dock
+    }
+
+    pub fn redraw(&self, model: &str) {
+        if !self.active {
+            return;
+        }
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        self.apply_scroll_region(height);
+        self.draw_box("", 0, model);
+        self.park_in_feed(height);
+    }
+
+    fn scroll_bottom(height: u16) -> u16 {
+        height.saturating_sub(3).max(1)
+    }
+
+    fn apply_scroll_region(&self, height: u16) {
+        let bottom = Self::scroll_bottom(height);
+        let mut out = io::stdout().lock();
+        let _ = write!(out, "\x1b[1;{bottom}r");
+        let _ = out.flush();
+    }
+
+    fn park_in_feed(&self, height: u16) {
+        let bottom = Self::scroll_bottom(height);
+        let mut out = io::stdout().lock();
+        let _ = execute!(out, MoveTo(0, bottom.saturating_sub(1)));
+    }
+
+    fn draw_box(&self, input: &str, cursor: usize, model: &str) {
+        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let box_width = usize::from(width).saturating_sub(1).max(20);
+        let inner_width = box_width.saturating_sub(4).max(1);
+        let utf8 = is_utf8_locale();
+        let (tl, tr, bl, br, hz, vt, glyph) = if utf8 {
+            ("╭─", "─╮", "╰─", "─╯", "─", "│", "›")
+        } else {
+            ("+-", "-+", "+-", "-+", "-", "|", ">")
+        };
+
+        let top_label = if model.is_empty() {
+            "prompt".to_string()
+        } else {
+            format!("prompt · {model}")
+        };
+        let hint = if utf8 {
+            "Enter send · ↑↓ history · Ctrl-U clear · Ctrl-D quit"
+        } else {
+            "Enter send · Up/Dn history · Ctrl-U clear · Ctrl-D quit"
+        };
+
+        let edit_width = inner_width.saturating_sub(2).max(1);
+        let (visible, cursor_col) = format_prompt_input(input, cursor, edit_width);
+        let padded = clip_line(&visible, edit_width);
+
+        let top_y = height.saturating_sub(3);
+        let mid_y = height.saturating_sub(2);
+        let bot_y = height.saturating_sub(1);
+
+        let mut out = io::stdout().lock();
+        let _ = queue!(
+            out,
+            MoveTo(0, top_y),
+            Clear(ClearType::UntilNewLine),
+            SetForegroundColor(Color::DarkGrey),
+            Print(box_border_line(tl, &top_label, hz, tr, box_width)),
+            ResetColor,
+            MoveTo(0, mid_y),
+            Clear(ClearType::UntilNewLine),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{vt} ")),
+            SetForegroundColor(Color::Cyan),
+            SetAttribute(Attribute::Bold),
+            Print(format!("{glyph} ")),
+            ResetColor,
+            Print(&padded),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!(" {vt}")),
+            ResetColor,
+            MoveTo(0, bot_y),
+            Clear(ClearType::UntilNewLine),
+            SetForegroundColor(Color::DarkGrey),
+            Print(box_border_line(bl, hint, hz, br, box_width)),
+            ResetColor,
+            MoveTo((4 + cursor_col).min(usize::from(u16::MAX)) as u16, mid_y),
+        );
+        let _ = out.flush();
+    }
+
+    pub fn read_line(&mut self, model: &str) -> Option<String> {
+        if !self.active {
+            prompt();
+            let mut line = String::new();
+            if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+                println!();
+                return None;
+            }
+            return Some(line);
+        }
+
+        struct RawGuard;
+        impl Drop for RawGuard {
+            fn drop(&mut self) {
+                let _ = terminal::disable_raw_mode();
+            }
+        }
+
+        if terminal::enable_raw_mode().is_err() {
+            prompt();
+            let mut line = String::new();
+            if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+                println!();
+                return None;
+            }
+            return Some(line);
+        }
+        let _raw = RawGuard;
+
+        let mut chars: Vec<char> = Vec::new();
+        let mut cursor = 0usize;
+        let mut hist_idx: Option<usize> = None;
+        let mut draft = String::new();
+
+        let (_, height) = terminal::size().unwrap_or((80, 24));
+        self.apply_scroll_region(height);
+        self.draw_box("", 0, model);
+
+        loop {
+            let input: String = chars.iter().collect();
+            self.draw_box(&input, cursor, model);
+
+            let Ok(ev) = event::read() else {
+                return None;
+            };
+            match ev {
+                Event::Resize(_, h) => {
+                    self.apply_scroll_region(h);
+                }
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key.code {
+                            KeyCode::Char('c') => return None,
+                            KeyCode::Char('d') if chars.is_empty() => return None,
+                            KeyCode::Char('a') => cursor = 0,
+                            KeyCode::Char('e') => cursor = chars.len(),
+                            KeyCode::Char('u') => {
+                                chars.clear();
+                                cursor = 0;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Enter => {
+                            let submitted: String = chars.iter().collect();
+                            drop(_raw);
+                            let (_, h) = terminal::size().unwrap_or((80, 24));
+                            self.park_in_feed(h);
+                            let trimmed = submitted.trim();
+                            if !trimmed.is_empty() {
+                                let glyph = if is_utf8_locale() { "›" } else { ">" };
+                                println!("\n{}{} {}{}", cyan(), glyph, reset(), sanitize(trimmed));
+                                if self.history.last().map(String::as_str) != Some(trimmed) {
+                                    self.history.push(trimmed.to_string());
+                                }
+                            }
+                            self.draw_box("", 0, model);
+                            self.park_in_feed(h);
+                            return Some(submitted);
+                        }
+                        KeyCode::Backspace => {
+                            if cursor > 0 {
+                                cursor -= 1;
+                                chars.remove(cursor);
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if cursor < chars.len() {
+                                chars.remove(cursor);
+                            }
+                        }
+                        KeyCode::Left => cursor = cursor.saturating_sub(1),
+                        KeyCode::Right => cursor = (cursor + 1).min(chars.len()),
+                        KeyCode::Home => cursor = 0,
+                        KeyCode::End => cursor = chars.len(),
+                        KeyCode::Up => {
+                            if !self.history.is_empty() {
+                                let next = match hist_idx {
+                                    None => {
+                                        draft = chars.iter().collect();
+                                        self.history.len() - 1
+                                    }
+                                    Some(idx) => idx.saturating_sub(1),
+                                };
+                                hist_idx = Some(next);
+                                chars = self.history[next].chars().collect();
+                                cursor = chars.len();
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(idx) = hist_idx {
+                                if idx + 1 < self.history.len() {
+                                    let next = idx + 1;
+                                    hist_idx = Some(next);
+                                    chars = self.history[next].chars().collect();
+                                } else {
+                                    hist_idx = None;
+                                    chars = draft.chars().collect();
+                                }
+                                cursor = chars.len();
+                            }
+                        }
+                        KeyCode::Char(ch) => {
+                            chars.insert(cursor, ch);
+                            cursor += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Default for PromptDock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for PromptDock {
+    fn drop(&mut self) {
+        if self.active {
+            let (_, height) = terminal::size().unwrap_or((80, 24));
+            let mut out = io::stdout().lock();
+            let _ = write!(out, "\x1b[r");
+            let _ = execute!(out, MoveTo(0, height.saturating_sub(1)));
+            let _ = writeln!(out);
+            let _ = out.flush();
+        }
+    }
+}
+
 pub fn prompt() {
     let glyph = if is_utf8_locale() { "›" } else { ">" };
     print!("{}{}{}{} ", bold(), cyan(), glyph, reset());
@@ -1377,6 +1662,16 @@ mod tests {
         assert!(scrollbar_thumb(0, 5, 20, 0));
         assert!(scrollbar_thumb(15, 5, 20, 4));
         assert!(!scrollbar_thumb(0, 10, 5, 0));
+    }
+
+    #[test]
+    fn prompt_input_scrolls_horizontally_around_cursor() {
+        let (vis, col) = format_prompt_input("abcdefghij", 10, 5);
+        assert_eq!(vis, "ghij");
+        assert_eq!(col, 4);
+        let (vis2, col2) = format_prompt_input("hello", 2, 10);
+        assert_eq!(vis2, "hello");
+        assert_eq!(col2, 2);
     }
 
     #[test]
