@@ -6,6 +6,7 @@
 - Add contributor, security, and agent guidance plus build/test documentation.
 - Add tests for provider configuration, response parsing, and file tools.
 - Add scrollable terminal pickers for provider and model selection.
+- Add `opencode` (OpenCode Zen) provider preset with `cost.text` pricing support.
 - Consolidate model selection under `/model`; the separate `/models` command is removed.
 - Show model pricing and cost tiers (`free`, `cheap`, `standard`, `expensive`) in setup and `/model` when provided by `/models`, and add `/cost` for session token usage and cost.
 - Use the operating system certificate store for HTTPS provider connections.

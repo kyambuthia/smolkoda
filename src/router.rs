@@ -593,7 +593,10 @@ pub fn parse_model_list(data: &Value) -> Result<Vec<ModelInfo>, String> {
                 .or_else(|| entry.get("id").and_then(Value::as_str))
                 .or_else(|| entry.get("name").and_then(Value::as_str))?
                 .to_string();
-            let pricing = entry.get("pricing").and_then(parse_model_pricing);
+            let pricing = entry
+                .get("pricing")
+                .and_then(parse_model_pricing)
+                .or_else(|| entry.get("cost").and_then(parse_opencode_cost));
             Some(ModelInfo { id, pricing })
         })
         .collect();
@@ -612,6 +615,22 @@ pub fn parse_model_list(data: &Value) -> Result<Vec<ModelInfo>, String> {
         return Err("provider returned no model IDs".to_string());
     }
     Ok(models)
+}
+
+fn parse_opencode_cost(cost: &Value) -> Option<ModelPricing> {
+    let text = cost.get("text")?;
+    let input_per_million = text
+        .get("input")
+        .and_then(|v| v.get("price"))
+        .and_then(parse_non_negative_f64)?;
+    let output_per_million = text
+        .get("output")
+        .and_then(|v| v.get("price"))
+        .and_then(parse_non_negative_f64)?;
+    Some(ModelPricing {
+        input_per_million,
+        output_per_million,
+    })
 }
 
 fn parse_model_pricing(pricing: &Value) -> Option<ModelPricing> {
@@ -934,5 +953,30 @@ mod tests {
         assert!(is_local_url("http://localhost:11434/v1"));
         assert!(is_local_url("http://127.0.0.1:8080/v1"));
         assert!(!is_local_url("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn parses_opencode_cost_schema() {
+        let data = json!({
+            "data": [
+                {
+                    "id": "big-pickle",
+                    "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}}
+                },
+                {
+                    "id": "claude-fable-5",
+                    "cost": {"text": {"input": {"price": 10}, "output": {"price": 50}}}
+                }
+            ]
+        });
+        let models = parse_model_list(&data).unwrap();
+        assert_eq!(models[0].id, "big-pickle");
+        assert_eq!(models[0].pricing.unwrap().tier(), CostTier::Free);
+        assert_eq!(models[1].id, "claude-fable-5");
+        assert_eq!(models[1].pricing.unwrap().tier(), CostTier::Expensive);
+        assert_eq!(
+            models[1].display_label(),
+            "claude-fable-5 (expensive · $10.00/$50.00 per 1M)"
+        );
     }
 }

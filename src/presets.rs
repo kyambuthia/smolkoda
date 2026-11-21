@@ -135,6 +135,23 @@ pub static PRESETS: &[Preset] = &[
         note: "OpenAI-compatible; Anthropic Messages is also available at /v1/messages.",
     },
     Preset {
+        id: "opencode",
+        label: "OpenCode Zen",
+        protocol: Protocol::OpenAi,
+        base_url: "https://opencode.ai/zen/v1",
+        default_model: "big-pickle",
+        env: &["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"],
+        auth: Auth::Bearer,
+        models: &[
+            "big-pickle",
+            "mimo-v2.6-flash-free",
+            "deepseek-v4.1-flash-free",
+        ],
+        headers: &[],
+        max_tokens_param: "max_tokens",
+        note: "OpenCode Zen gateway; includes free and paid models.",
+    },
+    Preset {
         id: "google",
         label: "Google Gemini",
         protocol: Protocol::OpenAi,
