@@ -259,6 +259,7 @@ pub fn build_settings(
     let auth_value = overrides
         .auth
         .clone()
+        .or_else(|| env_nonempty("SMOLKODA_AUTH"))
         .or_else(|| profile.and_then(|profile| profile.auth.clone()))
         .or_else(|| preset.map(|preset| preset.auth.as_str().to_string()))
         .unwrap_or_else(|| "bearer".to_string());

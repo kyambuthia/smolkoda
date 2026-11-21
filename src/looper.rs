@@ -13,10 +13,15 @@ pub struct Looper {
 
 impl Looper {
     pub fn new(router: Router) -> Self {
+        let max_steps = std::env::var("SMOLKODA_MAX_STEPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(50);
         Self {
             router,
             feed: Feed::default(),
-            max_steps: 50,
+            max_steps,
         }
     }
 
