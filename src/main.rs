@@ -257,16 +257,7 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
             print_config(&looper.router, path);
             continue;
         }
-        if line == "/feed" || line == "/timeline" {
-            print_feed(&looper.feed);
-            continue;
-        }
-        if line == "/tools" {
-            for spec in tools::SPECS {
-                println!("  {:<6} {}", spec.name, spec.description);
-            }
-            continue;
-        }
+
         if line == "/voice" || line.starts_with("/voice ") {
             let argument = line.strip_prefix("/voice").unwrap_or("").trim();
             let seconds = if argument.is_empty() {
@@ -539,23 +530,6 @@ fn print_config(router: &Router, path: &Path) {
     println!("  config:   {}", path.display());
 }
 
-fn print_feed(feed: &Feed) {
-    if feed.is_empty() {
-        ui::info("(empty feed)");
-        return;
-    }
-    let timeline = feed.timeline();
-    println!(
-        "{}Feed timeline{} ({} events)",
-        ui::bold(),
-        ui::reset(),
-        feed.len()
-    );
-    for (role, preview, age) in timeline {
-        println!("  {:>9}  {:>4}s  {}", role, age, preview);
-    }
-}
-
 fn cost_text(router: &Router) -> String {
     let route = router.primary();
     let usage = router.usage();
@@ -597,8 +571,6 @@ fn help_text() -> String {
         "  /model [name]     choose a model or set its ID",
         "  /cost             show session token usage and cost",
         "  /config           show active route",
-        "  /feed, /timeline  show the feed timeline",
-        "  /tools            list tools",
         "  /voice [seconds]  record a prompt and speak the reply",
         "  /clear            clear conversation",
         "  /quit             quit",
@@ -643,8 +615,6 @@ fn print_help() {
     println!("  /model [name]     choose a model or set its ID");
     println!("  /cost             show session token usage and cost");
     println!("  /config           show active route");
-    println!("  /feed, /timeline  show the feed timeline");
-    println!("  /tools            list tools");
     println!("  /voice [seconds]  record a prompt and speak the reply");
     println!("  /clear            clear conversation");
     println!("  /quit             quit");

@@ -124,8 +124,6 @@ and `fallbacks` (profile names tried in order for retryable failures).
 - `/model [name]` — open a scrollable model picker (with pricing/cost tier when available) or set the model directly
 - `/cost` — show session token usage and estimated or reported cost
 - `/config` — show the active route
-- `/feed` or `/timeline` — show the feed timeline
-- `/tools` — list tools
 - `/voice [seconds]` — record a spoken prompt and speak the reply (default: 8 seconds)
 - `/clear` — clear the conversation
 - `/quit` — quit

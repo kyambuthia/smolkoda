@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use serde_json::{json, Value};
 
 use crate::presets::Protocol;
@@ -30,7 +28,6 @@ pub enum EventKind {
 
 #[derive(Debug, Clone)]
 pub struct Event {
-    pub at: SystemTime,
     pub kind: EventKind,
 }
 
@@ -42,35 +39,24 @@ pub struct Feed {
 impl Feed {
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.events.push(Event {
-            at: SystemTime::now(),
             kind: EventKind::User(text.into()),
         });
     }
 
     pub fn push_assistant(&mut self, blocks: Vec<Block>) {
         self.events.push(Event {
-            at: SystemTime::now(),
             kind: EventKind::Assistant(blocks),
         });
     }
 
     pub fn push_tool_results(&mut self, results: Vec<ToolResult>) {
         self.events.push(Event {
-            at: SystemTime::now(),
             kind: EventKind::ToolResults(results),
         });
     }
 
     pub fn clear(&mut self) {
         self.events.clear();
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.events.len()
     }
 
     /// Convert the timeline into protocol-specific chat messages.
@@ -177,62 +163,6 @@ impl Feed {
         }
         messages
     }
-
-    /// Human-readable timeline entries: (role, preview, age in seconds).
-    pub fn timeline(&self) -> Vec<(String, String, u64)> {
-        self.events
-            .iter()
-            .map(|event| {
-                let (role, preview) = match &event.kind {
-                    EventKind::User(text) => ("user", first_line(text)),
-                    EventKind::Assistant(blocks) => {
-                        let text = blocks
-                            .iter()
-                            .filter_map(|block| match block {
-                                Block::Text(text) => Some(text.as_str()),
-                                Block::ToolUse { .. } => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        if text.is_empty() {
-                            let tools = blocks
-                                .iter()
-                                .filter_map(|block| match block {
-                                    Block::ToolUse { name, .. } => Some(name.as_str()),
-                                    Block::Text(_) => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            ("assistant", format!("[tools: {tools}]"))
-                        } else {
-                            ("assistant", first_line(&text))
-                        }
-                    }
-                    EventKind::ToolResults(results) => {
-                        let preview = results
-                            .first()
-                            .map(|result| first_line(&result.content))
-                            .unwrap_or_default();
-                        ("tools", preview)
-                    }
-                };
-                let age = SystemTime::now()
-                    .duration_since(event.at)
-                    .unwrap_or_default()
-                    .as_secs();
-                (role.to_string(), preview, age)
-            })
-            .collect()
-    }
-}
-
-fn first_line(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut preview: String = line.chars().take(70).collect();
-    if line.chars().count() > 70 {
-        preview.push_str("...");
-    }
-    preview
 }
 
 #[cfg(test)]

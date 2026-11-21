@@ -6,10 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEventKind,
-    },
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute, queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -103,7 +100,7 @@ pub enum AnimKind {
 const BAYER_4X4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 /// Pure time-based Bayer dither frame generator with distinct motion per state.
-pub fn dither_frame(t_ms: u64, width: usize, kind: AnimKind, utf8: bool) -> String {
+pub fn dither_frame(t_ms: u64, width: usize, _kind: AnimKind, utf8: bool) -> String {
     if width == 0 {
         return String::new();
     }
@@ -112,48 +109,16 @@ pub fn dither_frame(t_ms: u64, width: usize, kind: AnimKind, utf8: bool) -> Stri
     } else {
         &[' ', '·', '▫', '▪', '■']
     };
-    let speed = match kind {
-        AnimKind::Think => 70,
-        AnimKind::Tool => 50,
-        AnimKind::Fetch => 65,
-        AnimKind::Voice => 55,
-    };
-    let phase = (t_ms / speed) as usize;
-    let bayer_y = ((t_ms / (speed * 2)) % 4) as usize;
-    let center = (width as isize - 1) / 2;
+    let phase = (t_ms / 50) as usize;
+    let bayer_y = ((t_ms / 100) % 4) as usize;
+    let period = width.max(12);
 
     let mut out = String::with_capacity(width * 3);
     for x in 0..width {
-        let level = match kind {
-            AnimKind::Tool => {
-                // Directional left-to-right sweep
-                let period = width.max(8) * 2;
-                let dist = (phase + period - (x % period)) % period;
-                if dist < 6 {
-                    63 - dist * 10
-                } else {
-                    4
-                }
-            }
-            AnimKind::Voice => {
-                // Symmetric center-out pulse
-                let d = (x as isize - center).unsigned_abs();
-                let period = 16usize;
-                let pos = (d * 2 + phase) % period;
-                let half = period / 2;
-                let tri = if pos <= half { pos } else { period - pos };
-                (tri * 63) / half
-            }
-            AnimKind::Think | AnimKind::Fetch => {
-                let period = 20usize;
-                let half = period / 2;
-                let pos = (x * 2 + phase) % period;
-                let tri = if pos <= half { pos } else { period - pos };
-                (tri * 63) / half
-            }
-        };
+        let dist = (phase + period - (x % period)) % period;
+        let level = if dist < 8 { 63 - dist * 7 } else { 4 };
         let threshold = usize::from(BAYER_4X4[bayer_y][x % 4]) * 4;
-        let dithered = (level + threshold).saturating_sub(26).min(63);
+        let dithered = (level + threshold).saturating_sub(24).min(63);
         let idx = (dithered * (ramp.len() - 1)) / 63;
         out.push(ramp[idx]);
     }
@@ -489,17 +454,6 @@ impl FeedView {
         self.hit_boxes.clear();
     }
 
-    pub fn toggle_at_row(&mut self, row: u16) -> bool {
-        for &(start, end, entry_idx) in &self.hit_boxes {
-            if row >= start && row < end {
-                if let Some(entry) = self.entries.get_mut(entry_idx) {
-                    return entry.toggle();
-                }
-            }
-        }
-        false
-    }
-
     pub fn toggle_last_tool(&mut self) -> bool {
         for entry in self.entries.iter_mut().rev() {
             if matches!(entry, FeedEntry::Tool { .. }) {
@@ -585,10 +539,10 @@ impl FeedView {
                     }
                     if collapsible {
                         let hint = if *expanded {
-                            "      [click to collapse]".to_string()
+                            "      [Ctrl-O to collapse]".to_string()
                         } else {
                             format!(
-                                "      [+{} lines {dot} click to expand]",
+                                "      [+{} lines {dot} Ctrl-O to expand]",
                                 raw_lines.len() - 2
                             )
                         };
@@ -693,7 +647,7 @@ impl FeedView {
                             });
                         }
                         lines.push(RenderedLine {
-                            text: format!("{bl} [click to collapse]"),
+                            text: format!("{bl} [Ctrl-O to collapse]"),
                             style: LineStyle::Dim,
                             entry_idx: Some(idx),
                         });
@@ -900,9 +854,9 @@ impl PromptDock {
             format!("prompt · {}", self.model)
         };
         let hint = if utf8 {
-            "Enter send · click tool to expand · ↑↓ hist · PgUp/Dn scroll · Ctrl-D quit"
+            "Enter send · Ctrl-O toggle tool · ↑↓ hist · PgUp/Dn scroll · Ctrl-D quit"
         } else {
-            "Enter send · click tool · Up/Dn hist · PgUp/Dn scroll · Ctrl-D quit"
+            "Enter send · Ctrl-O toggle tool · Up/Dn hist · PgUp/Dn scroll · Ctrl-D quit"
         };
 
         let edit_width = inner_width.saturating_sub(2).max(1);
@@ -958,18 +912,12 @@ impl PromptDock {
         struct InputGuard;
         impl Drop for InputGuard {
             fn drop(&mut self) {
-                let mut out = io::stdout().lock();
-                let _ = execute!(out, DisableMouseCapture);
                 let _ = terminal::disable_raw_mode();
             }
         }
 
         if terminal::enable_raw_mode().is_err() {
             return None;
-        }
-        {
-            let mut out = io::stdout().lock();
-            let _ = execute!(out, EnableMouseCapture);
         }
         let _guard = InputGuard;
 
@@ -987,28 +935,6 @@ impl PromptDock {
             };
             match ev {
                 Event::Resize(_, _) => {}
-                Event::Mouse(mouse) => {
-                    let (_, height) = terminal::size().unwrap_or((80, 24));
-                    let viewport = height.saturating_sub(3).max(1);
-                    match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            if mouse.row < viewport {
-                                self.feed.toggle_at_row(mouse.row);
-                            }
-                        }
-                        MouseEventKind::ScrollUp => {
-                            self.feed.scroll_up(3);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            let content_w = usize::from(terminal::size().unwrap_or((80, 24)).0)
-                                .saturating_sub(1)
-                                .max(10);
-                            let total = self.feed.build_lines(content_w, is_utf8_locale()).len();
-                            self.feed.scroll_down(3, total, usize::from(viewport));
-                        }
-                        _ => {}
-                    }
-                }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         match key.code {
@@ -1132,7 +1058,7 @@ impl Drop for PromptDock {
         if self.active {
             set_feed_quiet(false);
             let mut out = io::stdout().lock();
-            let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
+            let _ = execute!(out, LeaveAlternateScreen);
             let _ = terminal::disable_raw_mode();
         }
     }
