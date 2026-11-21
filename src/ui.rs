@@ -107,7 +107,7 @@ pub fn dither_frame(t_ms: u64, width: usize, _kind: AnimKind, utf8: bool) -> Str
     let ramp: &[char] = if !utf8 {
         &[' ', '.', ':', '-', '=', '+', '*', '#']
     } else {
-        &[' ', '·', '▫', '▪', '■']
+        &[' ', '▫', '▪', '■']
     };
     let phase = (t_ms / 50) as usize;
     let bayer_y = ((t_ms / 100) % 4) as usize;
