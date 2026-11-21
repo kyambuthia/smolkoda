@@ -266,18 +266,23 @@ fn glob_files(args: &Value) -> Result<String, String> {
     Ok(list.join("\n"))
 }
 
+/// Collect regular files under `dir`, skipping `SKIP_DIRS`. Symlinked
+/// directories are not followed so link cycles cannot recurse forever.
 fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
-            if !SKIP_DIRS.contains(&name.as_str()) {
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if !SKIP_DIRS.iter().any(|skip| name == *skip) {
                 walk_files(&path, files);
             }
-        } else if path.is_file() {
+        } else if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
             files.push(path);
         }
     }
@@ -584,6 +589,21 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("'new'"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_does_not_follow_symlinked_directory_cycles() {
+        let dir = temp_dir("grep-cycle");
+        fs::write(dir.join("a.txt"), "needle\n").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+        let hits = run(
+            "grep",
+            &json!({"pat": "needle", "path": dir.to_string_lossy()}),
+        )
+        .unwrap();
+        assert_eq!(hits.lines().count(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 }
