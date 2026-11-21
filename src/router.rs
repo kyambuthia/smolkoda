@@ -268,7 +268,7 @@ impl Router {
             Ok(response) => response,
             Err(ureq::Error::Status(code, response)) => {
                 let body = response.into_string().unwrap_or_default();
-                return Err(format!("HTTP {code}: {}", extract_error(&body)));
+                return Err(format_http_error(code, &body));
             }
             Err(ureq::Error::Transport(err)) => {
                 return Err(format!("connection failed: {err}"));
@@ -488,7 +488,7 @@ pub fn fetch_models(
         Ok(response) => response,
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
-            return Err(format!("HTTP {code}: {}", extract_error(&body)));
+            return Err(format_http_error(code, &body));
         }
         Err(ureq::Error::Transport(err)) => {
             return Err(format!("connection failed: {err}"));
@@ -673,7 +673,16 @@ fn is_retryable(error: &str) -> bool {
         || error.contains("timed out")
 }
 
-pub(crate) fn extract_error(body: &str) -> String {
+pub(crate) fn format_http_error(code: u16, body: &str) -> String {
+    let detail = extract_error(body);
+    if code == 401 || code == 403 {
+        format!("HTTP {code}: {detail} — check your API key (run /provider to reconfigure)")
+    } else {
+        format!("HTTP {code}: {detail}")
+    }
+}
+
+pub fn extract_error(body: &str) -> String {
     if let Ok(data) = serde_json::from_str::<Value>(body) {
         if let Some(message) = data.pointer("/error/message").and_then(Value::as_str) {
             return message.to_string();
@@ -795,6 +804,13 @@ mod tests {
         );
         assert_eq!(extract_error(r#"{"message": "bad model"}"#), "bad model");
         assert_eq!(extract_error("plain failure"), "plain failure");
+    }
+
+    #[test]
+    fn auth_errors_include_provider_reconfigure_hint() {
+        let msg = format_http_error(401, r#"{"error":{"message":"User Not Found"}}"#);
+        assert!(msg.contains("HTTP 401: User Not Found"));
+        assert!(msg.contains("/provider"));
     }
 
     #[test]

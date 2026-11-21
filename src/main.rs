@@ -278,43 +278,73 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         }
         if let Some(rest) = line.strip_prefix("/provider") {
             let argument = rest.trim();
-            let target = if argument.is_empty() {
+            let current = looper.router.primary().name.clone();
+            let (target, force_setup) = if argument.is_empty() {
                 if ui::can_select() {
-                    let current = looper.router.primary().name.clone();
                     let (items, targets) = switch_provider_items(config, &current);
                     let initial = targets
                         .iter()
                         .position(|target| target == &current)
                         .unwrap_or(0);
-                    match ui::select("Switch provider", &items, initial) {
-                        Some(index) => targets[index].clone(),
+                    match ui::select("Switch or reconfigure provider", &items, initial) {
+                        Some(index) => {
+                            let chosen = targets[index].clone();
+                            let reconfig = chosen == current;
+                            (chosen, reconfig)
+                        }
                         None => continue,
                     }
                 } else {
                     print_providers(path, config);
                     match setup::ask("Switch to (blank to cancel)", None) {
-                        Some(value) => value,
+                        Some(value) => {
+                            let reconfig = value == current;
+                            (value, reconfig)
+                        }
                         None => continue,
                     }
                 }
+            } else if argument == "setup" {
+                (current.clone(), true)
+            } else if let Some(name) = argument.strip_suffix(" setup") {
+                (name.trim().to_string(), true)
             } else {
-                argument.to_string()
+                (argument.to_string(), false)
             };
             if target.is_empty() {
                 continue;
             }
-            match switch_provider(&target, config, path) {
+            dock.suspend();
+            let switched = if force_setup {
+                reconfigure_provider(&target, config, path)
+            } else {
+                switch_provider(&target, config, path)
+            };
+            match switched {
                 Ok(settings) => {
                     looper.router = build_router(&settings, config);
-                    println!(
-                        "{}Switched to {} ({}){}",
-                        ui::green(),
-                        settings.name,
-                        settings.model,
-                        ui::reset()
-                    );
+                    dock.resume(&settings.model);
+                    let msg = format!("Active provider: {} ({})", settings.name, settings.model);
+                    if dock.is_active() {
+                        dock.push(ui::FeedEntry::Info {
+                            text: msg,
+                            is_error: false,
+                        });
+                    } else {
+                        println!("{}{}{}", ui::green(), msg, ui::reset());
+                    }
                 }
-                Err(err) => ui::error(&err),
+                Err(err) => {
+                    dock.resume(&looper.router.primary().model);
+                    if dock.is_active() {
+                        dock.push(ui::FeedEntry::Info {
+                            text: format!("error: {err}"),
+                            is_error: true,
+                        });
+                    } else {
+                        ui::error(&err);
+                    }
+                }
             }
             continue;
         }
@@ -393,6 +423,20 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
             }
         }
     }
+}
+
+fn reconfigure_provider(name: &str, config: &mut Config, path: &Path) -> Result<Settings, String> {
+    if presets::find(name).is_none() && !config.providers.contains_key(name) {
+        return Err(format!("unknown provider '{name}'; try /provider"));
+    }
+    if !setup::setup_wizard(config, path, Some(name))? {
+        return Err("cancelled".to_string());
+    }
+    let active = config.active.clone().unwrap_or_else(|| name.to_string());
+    let settings = config::build_settings(&active, config, &Overrides::default())?;
+    config.active = Some(settings.name.clone());
+    config::save_config(path, config)?;
+    Ok(settings)
 }
 
 fn switch_provider(name: &str, config: &mut Config, path: &Path) -> Result<Settings, String> {

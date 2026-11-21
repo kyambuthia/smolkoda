@@ -831,6 +831,24 @@ impl PromptDock {
         }
     }
 
+    pub fn suspend(&self) {
+        if self.active {
+            set_feed_quiet(false);
+            let mut out = io::stdout().lock();
+            let _ = execute!(out, LeaveAlternateScreen);
+        }
+    }
+
+    pub fn resume(&mut self, model: &str) {
+        self.model = model.to_string();
+        if self.active {
+            set_feed_quiet(true);
+            let mut out = io::stdout().lock();
+            let _ = execute!(out, EnterAlternateScreen);
+            self.render("", 0);
+        }
+    }
+
     fn render(&mut self, input: &str, cursor: usize) {
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let viewport = height.saturating_sub(3).max(1);
