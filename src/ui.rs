@@ -195,9 +195,16 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
             if let Ok(active) = STATUS_MUTEX.lock() {
                 if active.is_some() {
                     let mut err = io::stderr().lock();
+                    if is_feed_quiet() {
+                        let (_, h) = terminal::size().unwrap_or((80, 24));
+                        let status_row = h.saturating_sub(4);
+                        let _ = queue!(err, MoveTo(0, status_row));
+                    } else {
+                        let _ = write!(err, "\r");
+                    }
                     let _ = write!(
                         err,
-                        "\r{}{}{} {}{}{}\x1b[K",
+                        "{}{}{} {}{}{}\x1b[K",
                         dim(),
                         label_trim,
                         reset(),
@@ -244,8 +251,14 @@ pub fn busy<T>(kind: AnimKind, label: &str, work: impl FnOnce() -> T) -> T {
             }
             if self.drawn.load(Ordering::Relaxed) {
                 let mut err = io::stderr().lock();
-                let _ = write!(err, "\r\x1b[2K");
-                let _ = err.flush();
+                if is_feed_quiet() {
+                    let (_, h) = terminal::size().unwrap_or((80, 24));
+                    let status_row = h.saturating_sub(4);
+                    let _ = execute!(err, MoveTo(0, status_row), Clear(ClearType::CurrentLine));
+                } else {
+                    let _ = write!(err, "\r\x1b[2K");
+                    let _ = err.flush();
+                }
             }
         }
     }
@@ -415,6 +428,10 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+fn strip_inline_md(text: &str) -> String {
+    text.replace("**", "").replace('`', "")
+}
+
 fn format_duration_short(elapsed: Duration) -> String {
     let ms = elapsed.as_millis();
     if ms >= 1000 {
@@ -479,14 +496,73 @@ impl FeedView {
     fn build_lines(&self, width: usize, utf8: bool) -> Vec<RenderedLine> {
         let mut lines = Vec::new();
         let dot = if utf8 { "·" } else { "-" };
+        let bullet = if utf8 { "•" } else { "-" };
         let (tl, vt, bl, c_arrow, e_arrow) = if utf8 {
             ("╭─", "│ ", "╰─", "▸", "▾")
         } else {
             ("+-", "| ", "+-", ">", "v")
         };
 
-        for (idx, entry) in self.entries.iter().enumerate() {
-            match entry {
+        let mut idx = 0usize;
+        while idx < self.entries.len() {
+            // Group >2 consecutive collapsed, non-error Tool entries into one crisp summary row
+            if matches!(
+                self.entries[idx],
+                FeedEntry::Tool {
+                    expanded: false,
+                    is_error: false,
+                    ..
+                }
+            ) {
+                let mut end = idx;
+                while end < self.entries.len()
+                    && matches!(
+                        self.entries[end],
+                        FeedEntry::Tool {
+                            expanded: false,
+                            is_error: false,
+                            ..
+                        }
+                    )
+                {
+                    end += 1;
+                }
+                if end - idx > 2 {
+                    let mut total_elapsed = Duration::ZERO;
+                    let mut counts: std::collections::BTreeMap<&str, usize> =
+                        std::collections::BTreeMap::new();
+                    for entry in &self.entries[idx..end] {
+                        if let FeedEntry::Tool { name, elapsed, .. } = entry {
+                            total_elapsed += *elapsed;
+                            *counts.entry(name.as_str()).or_insert(0) += 1;
+                        }
+                    }
+                    let summary_parts: Vec<String> = counts
+                        .into_iter()
+                        .map(|(name, n)| format!("{name} ×{n}"))
+                        .collect();
+                    let timing = format_duration_short(total_elapsed);
+                    let text = clip_line(
+                        &format!(
+                            "{c_arrow} {} tools ({}) {dot} {timing}  [Ctrl-O to expand]",
+                            end - idx,
+                            summary_parts.join(", ")
+                        ),
+                        width.max(10),
+                    )
+                    .trim_end()
+                    .to_string();
+                    lines.push(RenderedLine {
+                        text,
+                        style: LineStyle::ToolCollapsed,
+                        entry_idx: Some(end - 1),
+                    });
+                    idx = end;
+                    continue;
+                }
+            }
+
+            match &self.entries[idx] {
                 FeedEntry::Banner { model, provider } => {
                     lines.push(RenderedLine {
                         text: format!("{tl} smolkoda v{}", env!("CARGO_PKG_VERSION")),
@@ -560,12 +636,29 @@ impl FeedView {
                         entry_idx: None,
                     });
                     let clean = sanitize(text);
-                    for wrapped in wrap_text(&clean, width.max(10)) {
-                        lines.push(RenderedLine {
-                            text: wrapped,
-                            style: LineStyle::Normal,
-                            entry_idx: None,
-                        });
+                    for raw in clean.lines() {
+                        let trimmed = raw.trim_start();
+                        let (formatted, is_bold) = if let Some(rest) = trimmed
+                            .strip_prefix("**")
+                            .and_then(|s| s.strip_suffix("**"))
+                        {
+                            (rest.to_string(), true)
+                        } else if let Some(rest) = trimmed.strip_prefix("- ") {
+                            (format!("  {bullet} {}", strip_inline_md(rest)), false)
+                        } else {
+                            (strip_inline_md(raw), false)
+                        };
+                        for wrapped in wrap_text(&formatted, width.max(10)) {
+                            lines.push(RenderedLine {
+                                text: wrapped,
+                                style: if is_bold {
+                                    LineStyle::Bold
+                                } else {
+                                    LineStyle::Normal
+                                },
+                                entry_idx: None,
+                            });
+                        }
                     }
                 }
                 FeedEntry::Tool {
@@ -585,8 +678,8 @@ impl FeedView {
                         format!("{} lines", res_lines.len())
                     } else {
                         let one = res_lines.first().copied().unwrap_or("ok");
-                        let clipped: String = one.chars().take(36).collect();
-                        if one.chars().count() > 36 {
+                        let clipped: String = one.chars().take(28).collect();
+                        if one.chars().count() > 28 {
                             format!("{clipped}...")
                         } else {
                             clipped
@@ -594,25 +687,27 @@ impl FeedView {
                     };
                     let timing = format_duration_short(*elapsed);
                     let arrow = if *expanded { e_arrow } else { c_arrow };
+                    let suffix = format!(" {dot} {summary} {dot} {timing}");
+                    let max_left = width.saturating_sub(suffix.chars().count()).max(12);
                     let prev_part = if preview.is_empty() {
                         String::new()
                     } else {
                         format!(" {}", sanitize(preview))
                     };
-                    let header =
-                        format!("{arrow} {name}{prev_part} {dot} {summary} {dot} {timing}");
+                    let left = clip_line(&format!("{arrow} {name}{prev_part}"), max_left)
+                        .trim_end()
+                        .to_string();
+                    let header = format!("{left}{suffix}");
                     let header_style = if *is_error {
                         LineStyle::ToolError
                     } else {
                         LineStyle::ToolCollapsed
                     };
-                    for wrapped in wrap_text(&header, width.max(10)) {
-                        lines.push(RenderedLine {
-                            text: wrapped,
-                            style: header_style,
-                            entry_idx: Some(idx),
-                        });
-                    }
+                    lines.push(RenderedLine {
+                        text: header,
+                        style: header_style,
+                        entry_idx: Some(idx),
+                    });
                     if *expanded {
                         if !args_detail.is_empty() {
                             for wrapped in
@@ -687,6 +782,7 @@ impl FeedView {
                     }
                 }
             }
+            idx += 1;
         }
         lines
     }
@@ -851,7 +947,7 @@ impl PromptDock {
 
     fn render(&mut self, input: &str, cursor: usize) {
         let (width, height) = terminal::size().unwrap_or((80, 24));
-        let viewport = height.saturating_sub(3).max(1);
+        let viewport = height.saturating_sub(4).max(1);
         let _ = self.feed.render_into(width, viewport);
         self.draw_box(input, cursor, width, height);
     }
@@ -990,17 +1086,17 @@ impl PromptDock {
                             self.render("", 0);
                             let (_, height) = terminal::size().unwrap_or((80, 24));
                             let mut out = io::stdout().lock();
-                            let _ = execute!(out, MoveTo(0, height.saturating_sub(3)));
+                            let _ = execute!(out, MoveTo(0, height.saturating_sub(4)));
                             return Some(submitted);
                         }
                         KeyCode::PageUp => {
                             let (_, height) = terminal::size().unwrap_or((80, 24));
-                            let vp = usize::from(height.saturating_sub(3).max(1));
+                            let vp = usize::from(height.saturating_sub(4).max(1));
                             self.feed.scroll_up(vp.max(1));
                         }
                         KeyCode::PageDown => {
                             let (w, height) = terminal::size().unwrap_or((80, 24));
-                            let vp = usize::from(height.saturating_sub(3).max(1));
+                            let vp = usize::from(height.saturating_sub(4).max(1));
                             let total = self
                                 .feed
                                 .build_lines(
@@ -1676,7 +1772,7 @@ fn render_select(
     let height = usize::from(height).max(1);
     let box_width = width.saturating_sub(1).max(12);
     let inner_width = box_width.saturating_sub(4).max(1);
-    let viewport = height.saturating_sub(3).max(1);
+    let viewport = height.saturating_sub(4).max(1);
     let utf8 = is_utf8_locale();
     let (tl, tr, bl, br, hz, vt, thumb, marker) = if utf8 {
         ("╭─", "─╮", "╰─", "─╯", "─", "│", "┃", "▌ ")
