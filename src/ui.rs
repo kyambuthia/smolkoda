@@ -1304,7 +1304,7 @@ pub fn tool_preview_arg<'a>(name: &str, args: &'a Value) -> Option<&'a Value> {
     let obj = args.as_object()?;
     let preferred = match name {
         "read" | "write" | "edit" => &["path"][..],
-        "glob" | "grep" => &["pattern", "path"][..],
+        "glob" | "grep" => &["pat", "pattern", "path"][..],
         "bash" => &["cmd", "command"][..],
         _ => &[][..],
     };
