@@ -142,6 +142,7 @@ impl Looper {
                         results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content: result,
+                            is_error,
                         });
                     }
                 }

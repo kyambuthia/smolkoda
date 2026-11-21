@@ -17,6 +17,7 @@ pub enum Block {
 pub struct ToolResult {
     pub tool_use_id: String,
     pub content: String,
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,11 +96,15 @@ impl Feed {
                     let content: Vec<Value> = results
                         .iter()
                         .map(|result| {
-                            json!({
+                            let mut obj = json!({
                                 "type": "tool_result",
                                 "tool_use_id": result.tool_use_id,
                                 "content": result.content,
-                            })
+                            });
+                            if result.is_error {
+                                obj["is_error"] = json!(true);
+                            }
+                            obj
                         })
                         .collect();
                     messages.push(json!({"role": "user", "content": content}));
@@ -185,6 +190,7 @@ mod tests {
         feed.push_tool_results(vec![ToolResult {
             tool_use_id: "tool_1".to_string(),
             content: "contents".to_string(),
+            is_error: true,
         }]);
         feed
     }
@@ -199,6 +205,7 @@ mod tests {
         assert_eq!(messages[1]["content"][1]["id"], "tool_1");
         assert_eq!(messages[2]["content"][0]["type"], "tool_result");
         assert_eq!(messages[2]["content"][0]["tool_use_id"], "tool_1");
+        assert_eq!(messages[2]["content"][0]["is_error"], true);
     }
 
     #[test]
