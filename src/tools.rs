@@ -144,7 +144,10 @@ fn path_arg(args: &Value, key: &str) -> Result<PathBuf, String> {
 fn read(args: &Value) -> Result<String, String> {
     let path = path_arg(args, "path")?;
     if path.is_dir() {
-        return Err(format!("{} is a directory", path.display()));
+        return Err(format!(
+            "{} is a directory; use glob to list files",
+            path.display()
+        ));
     }
     let metadata = fs::metadata(&path).map_err(|err| format!("{}: {err}", path.display()))?;
     if metadata.len() > 5_000_000 {
@@ -239,11 +242,12 @@ fn glob_files(args: &Value) -> Result<String, String> {
         Path::new(root).join(&pattern).to_string_lossy().to_string()
     };
     let mut files = Vec::new();
+    let root_path = Path::new(root);
     for path in glob(&full)
         .map_err(|err| format!("bad glob: {err}"))?
         .flatten()
     {
-        if path.is_file() {
+        if path.is_file() && !has_skipped_dir(&path, root_path) {
             files.push(path);
         }
     }
@@ -264,6 +268,16 @@ fn glob_files(args: &Value) -> Result<String, String> {
         ));
     }
     Ok(list.join("\n"))
+}
+
+fn has_skipped_dir(path: &Path, root: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| SKIP_DIRS.contains(&name))
+    })
 }
 
 /// Collect regular files under `dir`, skipping `SKIP_DIRS`. Symlinked
@@ -614,6 +628,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hits.lines().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn glob_skips_skip_dirs() {
+        let dir = temp_dir("glob-skip-dirs");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        fs::write(dir.join("src/app.ts"), "export {};").unwrap();
+        fs::write(dir.join("node_modules/pkg/index.ts"), "export {};").unwrap();
+        let out = run(
+            "glob",
+            &json!({"pat": "**/*.ts", "path": dir.to_string_lossy()}),
+        )
+        .unwrap();
+        assert!(out.contains("src/app.ts"));
+        assert!(!out.contains("node_modules"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
