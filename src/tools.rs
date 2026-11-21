@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use crate::presets::Protocol;
 
 pub const MAX_TOOL_CHARS: usize = 40_000;
+const MAX_GLOB_RESULTS: usize = 200;
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".hg",
@@ -248,16 +249,21 @@ fn glob_files(args: &Value) -> Result<String, String> {
     }
     files.sort_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
     files.reverse();
-    let list: Vec<String> = files
+    if files.is_empty() {
+        return Ok("none".to_string());
+    }
+    let mut list: Vec<String> = files
         .iter()
-        .take(200)
+        .take(MAX_GLOB_RESULTS)
         .map(|path| path.display().to_string())
         .collect();
-    Ok(if list.is_empty() {
-        "none".to_string()
-    } else {
-        list.join("\n")
-    })
+    if files.len() > MAX_GLOB_RESULTS {
+        list.push(format!(
+            "... ({} more files)",
+            files.len() - MAX_GLOB_RESULTS
+        ));
+    }
+    Ok(list.join("\n"))
 }
 
 fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
