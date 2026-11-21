@@ -372,7 +372,9 @@ fn bash(args: &Value) -> Result<String, String> {
     let mut push_line = |line: String| {
         if size < MAX_TOOL_CHARS {
             size += line.len();
-            crate::ui::emit_line(&format!("│ {line}"));
+            if !crate::ui::is_feed_quiet() {
+                crate::ui::emit_line(&format!("│ {line}"));
+            }
             chunks.push(line);
         } else {
             truncated = true;

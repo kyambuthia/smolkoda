@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind,
+    },
     execute, queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -16,6 +19,15 @@ use serde_json::Value;
 use crate::router::{format_usd, CostTier, ModelInfo};
 
 static STATUS_MUTEX: Mutex<Option<String>> = Mutex::new(None);
+static FEED_QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_feed_quiet(quiet: bool) {
+    FEED_QUIET.store(quiet, Ordering::Relaxed);
+}
+
+pub fn is_feed_quiet() -> bool {
+    FEED_QUIET.load(Ordering::Relaxed)
+}
 
 fn color_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -341,59 +353,538 @@ pub fn format_prompt_input(input: &str, cursor: usize, max_width: usize) -> (Str
     (visible, cursor - start)
 }
 
-/// Pinned bottom prompt region using an ANSI scroll region (`DECSTBM`) so the
-/// conversation feed flows upwards above it. Falls back to standard line input
-/// when not attached to an interactive TTY.
+#[derive(Debug, Clone)]
+pub enum FeedEntry {
+    Banner {
+        model: String,
+        provider: String,
+    },
+    User {
+        text: String,
+        expanded: bool,
+    },
+    Assistant {
+        text: String,
+    },
+    Tool {
+        name: String,
+        preview: String,
+        args_detail: String,
+        result: String,
+        elapsed: Duration,
+        is_error: bool,
+        expanded: bool,
+    },
+    TurnMeta {
+        input_tokens: u64,
+        output_tokens: u64,
+        turn_cost: Option<f64>,
+        session_cost: Option<f64>,
+    },
+    Info {
+        text: String,
+        is_error: bool,
+    },
+}
+
+impl FeedEntry {
+    pub fn toggle(&mut self) -> bool {
+        match self {
+            Self::Tool { expanded, .. } => {
+                *expanded = !*expanded;
+                true
+            }
+            Self::User { text, expanded } if text.lines().count() > 3 => {
+                *expanded = !*expanded;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineStyle {
+    Normal,
+    Dim,
+    Bold,
+    ToolCollapsed,
+    ToolError,
+    UserHeader,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedLine {
+    text: String,
+    style: LineStyle,
+    entry_idx: Option<usize>,
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    for raw_line in text.lines() {
+        if raw_line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut count = 0usize;
+        for ch in raw_line.chars() {
+            if count >= width {
+                out.push(current);
+                current = String::new();
+                count = 0;
+            }
+            current.push(ch);
+            count += 1;
+        }
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn format_duration_short(elapsed: Duration) -> String {
+    let ms = elapsed.as_millis();
+    if ms >= 1000 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct FeedView {
+    pub entries: Vec<FeedEntry>,
+    pub scroll: usize,
+    pub follow_tail: bool,
+    pub hit_boxes: Vec<(u16, u16, usize)>,
+}
+
+impl FeedView {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            scroll: 0,
+            follow_tail: true,
+            hit_boxes: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, entry: FeedEntry) {
+        self.entries.push(entry);
+        self.follow_tail = true;
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.scroll = 0;
+        self.follow_tail = true;
+        self.hit_boxes.clear();
+    }
+
+    pub fn toggle_at_row(&mut self, row: u16) -> bool {
+        for &(start, end, entry_idx) in &self.hit_boxes {
+            if row >= start && row < end {
+                if let Some(entry) = self.entries.get_mut(entry_idx) {
+                    return entry.toggle();
+                }
+            }
+        }
+        false
+    }
+
+    pub fn toggle_last_tool(&mut self) -> bool {
+        for entry in self.entries.iter_mut().rev() {
+            if matches!(entry, FeedEntry::Tool { .. }) {
+                return entry.toggle();
+            }
+        }
+        false
+    }
+
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.follow_tail = false;
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    pub fn scroll_down(&mut self, lines: usize, total_lines: usize, viewport: usize) {
+        let max_scroll = total_lines.saturating_sub(viewport);
+        self.scroll = (self.scroll + lines).min(max_scroll);
+        if self.scroll >= max_scroll {
+            self.follow_tail = true;
+        }
+    }
+
+    fn build_lines(&self, width: usize, utf8: bool) -> Vec<RenderedLine> {
+        let mut lines = Vec::new();
+        let dot = if utf8 { "·" } else { "-" };
+        let (tl, vt, bl, c_arrow, e_arrow) = if utf8 {
+            ("╭─", "│ ", "╰─", "▸", "▾")
+        } else {
+            ("+-", "| ", "+-", ">", "v")
+        };
+
+        for (idx, entry) in self.entries.iter().enumerate() {
+            match entry {
+                FeedEntry::Banner { model, provider } => {
+                    lines.push(RenderedLine {
+                        text: format!("{tl} smolkoda v{}", env!("CARGO_PKG_VERSION")),
+                        style: LineStyle::Bold,
+                        entry_idx: None,
+                    });
+                    lines.push(RenderedLine {
+                        text: format!("{vt} {model} {dot} {provider}"),
+                        style: LineStyle::Dim,
+                        entry_idx: None,
+                    });
+                    lines.push(RenderedLine {
+                        text: format!("{bl} /help {dot} /model {dot} /cost {dot} /quit"),
+                        style: LineStyle::Dim,
+                        entry_idx: None,
+                    });
+                }
+                FeedEntry::User { text, expanded } => {
+                    lines.push(RenderedLine {
+                        text: String::new(),
+                        style: LineStyle::Normal,
+                        entry_idx: None,
+                    });
+                    let clean = sanitize(text);
+                    let raw_lines: Vec<&str> = clean.lines().collect();
+                    let collapsible = raw_lines.len() > 3;
+                    let show_lines: Vec<&str> = if collapsible && !*expanded {
+                        raw_lines.iter().take(2).copied().collect()
+                    } else {
+                        raw_lines.clone()
+                    };
+                    let mut first = true;
+                    for raw in show_lines {
+                        for wrapped in wrap_text(raw, width.saturating_sub(6).max(10)) {
+                            if first {
+                                lines.push(RenderedLine {
+                                    text: wrapped,
+                                    style: LineStyle::UserHeader,
+                                    entry_idx: collapsible.then_some(idx),
+                                });
+                                first = false;
+                            } else {
+                                lines.push(RenderedLine {
+                                    text: format!("      {wrapped}"),
+                                    style: LineStyle::Bold,
+                                    entry_idx: collapsible.then_some(idx),
+                                });
+                            }
+                        }
+                    }
+                    if collapsible {
+                        let hint = if *expanded {
+                            "      [click to collapse]".to_string()
+                        } else {
+                            format!(
+                                "      [+{} lines {dot} click to expand]",
+                                raw_lines.len() - 2
+                            )
+                        };
+                        lines.push(RenderedLine {
+                            text: hint,
+                            style: LineStyle::Dim,
+                            entry_idx: Some(idx),
+                        });
+                    }
+                }
+                FeedEntry::Assistant { text } => {
+                    lines.push(RenderedLine {
+                        text: String::new(),
+                        style: LineStyle::Normal,
+                        entry_idx: None,
+                    });
+                    let clean = sanitize(text);
+                    for wrapped in wrap_text(&clean, width.max(10)) {
+                        lines.push(RenderedLine {
+                            text: wrapped,
+                            style: LineStyle::Normal,
+                            entry_idx: None,
+                        });
+                    }
+                }
+                FeedEntry::Tool {
+                    name,
+                    preview,
+                    args_detail,
+                    result,
+                    elapsed,
+                    is_error,
+                    expanded,
+                } => {
+                    let clean_res = sanitize(result);
+                    let res_lines: Vec<&str> = clean_res.lines().collect();
+                    let summary = if *is_error {
+                        res_lines.first().copied().unwrap_or("error").to_string()
+                    } else if res_lines.len() > 1 {
+                        format!("{} lines", res_lines.len())
+                    } else {
+                        let one = res_lines.first().copied().unwrap_or("ok");
+                        let clipped: String = one.chars().take(36).collect();
+                        if one.chars().count() > 36 {
+                            format!("{clipped}...")
+                        } else {
+                            clipped
+                        }
+                    };
+                    let timing = format_duration_short(*elapsed);
+                    let arrow = if *expanded { e_arrow } else { c_arrow };
+                    let prev_part = if preview.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", sanitize(preview))
+                    };
+                    let header =
+                        format!("{arrow} {name}{prev_part} {dot} {summary} {dot} {timing}");
+                    let header_style = if *is_error {
+                        LineStyle::ToolError
+                    } else {
+                        LineStyle::ToolCollapsed
+                    };
+                    for wrapped in wrap_text(&header, width.max(10)) {
+                        lines.push(RenderedLine {
+                            text: wrapped,
+                            style: header_style,
+                            entry_idx: Some(idx),
+                        });
+                    }
+                    if *expanded {
+                        if !args_detail.is_empty() {
+                            for wrapped in
+                                wrap_text(&sanitize(args_detail), width.saturating_sub(2).max(10))
+                            {
+                                lines.push(RenderedLine {
+                                    text: format!("{vt}{wrapped}"),
+                                    style: LineStyle::Dim,
+                                    entry_idx: Some(idx),
+                                });
+                            }
+                        }
+                        let cap = 40usize;
+                        for raw in res_lines.iter().take(cap) {
+                            for wrapped in wrap_text(raw, width.saturating_sub(2).max(10)) {
+                                lines.push(RenderedLine {
+                                    text: format!("{vt}{wrapped}"),
+                                    style: if *is_error {
+                                        LineStyle::Error
+                                    } else {
+                                        LineStyle::Normal
+                                    },
+                                    entry_idx: Some(idx),
+                                });
+                            }
+                        }
+                        if res_lines.len() > cap {
+                            lines.push(RenderedLine {
+                                text: format!("{vt}... (+{} more lines)", res_lines.len() - cap),
+                                style: LineStyle::Dim,
+                                entry_idx: Some(idx),
+                            });
+                        }
+                        lines.push(RenderedLine {
+                            text: format!("{bl} [click to collapse]"),
+                            style: LineStyle::Dim,
+                            entry_idx: Some(idx),
+                        });
+                    }
+                }
+                FeedEntry::TurnMeta {
+                    input_tokens,
+                    output_tokens,
+                    turn_cost,
+                    session_cost,
+                } => {
+                    let mut meta = format!("  tokens: {input_tokens} in / {output_tokens} out");
+                    if let Some(c) = turn_cost {
+                        meta.push_str(&format!(" {dot} ~{}", format_usd(*c)));
+                    }
+                    if let Some(s) = session_cost {
+                        meta.push_str(&format!(" (session: {})", format_usd(*s)));
+                    }
+                    lines.push(RenderedLine {
+                        text: meta,
+                        style: LineStyle::Dim,
+                        entry_idx: None,
+                    });
+                }
+                FeedEntry::Info { text, is_error } => {
+                    let clean = sanitize(text);
+                    for wrapped in wrap_text(&clean, width.max(10)) {
+                        lines.push(RenderedLine {
+                            text: wrapped,
+                            style: if *is_error {
+                                LineStyle::Error
+                            } else {
+                                LineStyle::Dim
+                            },
+                            entry_idx: None,
+                        });
+                    }
+                }
+            }
+        }
+        lines
+    }
+
+    pub fn render_into(&mut self, width: u16, viewport: u16) -> io::Result<usize> {
+        let utf8 = is_utf8_locale();
+        let glyph = if utf8 { "›" } else { ">" };
+        let content_w = usize::from(width).saturating_sub(1).max(10);
+        let all_lines = self.build_lines(content_w, utf8);
+        let total = all_lines.len();
+        let vp = usize::from(viewport);
+
+        if self.follow_tail {
+            self.scroll = total.saturating_sub(vp);
+        } else {
+            self.scroll = self.scroll.min(total.saturating_sub(vp));
+        }
+
+        self.hit_boxes.clear();
+        let mut out = io::stdout().lock();
+        for row in 0..vp {
+            let y = row as u16;
+            queue!(out, MoveTo(0, y), Clear(ClearType::UntilNewLine))?;
+            let Some(line) = all_lines.get(self.scroll + row) else {
+                continue;
+            };
+            if let Some(idx) = line.entry_idx {
+                if let Some(last) = self.hit_boxes.last_mut() {
+                    if last.2 == idx && last.1 == y {
+                        last.1 = y + 1;
+                    } else {
+                        self.hit_boxes.push((y, y + 1, idx));
+                    }
+                } else {
+                    self.hit_boxes.push((y, y + 1, idx));
+                }
+            }
+            match line.style {
+                LineStyle::Normal => {
+                    queue!(out, Print(&line.text))?;
+                }
+                LineStyle::Dim => {
+                    queue!(
+                        out,
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(&line.text),
+                        ResetColor
+                    )?;
+                }
+                LineStyle::Bold => {
+                    queue!(
+                        out,
+                        SetAttribute(Attribute::Bold),
+                        Print(&line.text),
+                        SetAttribute(Attribute::Reset)
+                    )?;
+                }
+                LineStyle::ToolCollapsed => {
+                    queue!(
+                        out,
+                        SetForegroundColor(Color::Cyan),
+                        Print(&line.text),
+                        ResetColor
+                    )?;
+                }
+                LineStyle::ToolError | LineStyle::Error => {
+                    queue!(
+                        out,
+                        SetForegroundColor(Color::Red),
+                        Print(&line.text),
+                        ResetColor
+                    )?;
+                }
+                LineStyle::UserHeader => {
+                    queue!(
+                        out,
+                        SetForegroundColor(Color::Cyan),
+                        Print(format!("you {glyph} ")),
+                        ResetColor,
+                        SetAttribute(Attribute::Bold),
+                        Print(&line.text),
+                        SetAttribute(Attribute::Reset)
+                    )?;
+                }
+            }
+        }
+        out.flush()?;
+        Ok(total)
+    }
+}
+
+/// Pinned bottom prompt region with an interactive scrollable/clickable `FeedView`
+/// above it. Falls back to standard line input when not attached to an interactive TTY.
 pub struct PromptDock {
     active: bool,
     history: Vec<String>,
+    pub feed: FeedView,
+    model: String,
 }
 
 impl PromptDock {
     pub fn new() -> Self {
         let (_, height) = terminal::size().unwrap_or((80, 24));
         let active = can_select() && height >= 8;
-        let dock = Self {
+        let mut dock = Self {
             active,
             history: Vec::new(),
+            feed: FeedView::new(),
+            model: String::new(),
         };
         if dock.active {
-            dock.apply_scroll_region(height);
-            dock.draw_box("", 0, "");
-            dock.park_in_feed(height);
+            set_feed_quiet(true);
+            let mut out = io::stdout().lock();
+            let _ = execute!(out, EnterAlternateScreen);
+            dock.render("", 0);
         }
         dock
     }
 
-    pub fn redraw(&self, model: &str) {
-        if !self.active {
-            return;
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn push(&mut self, entry: FeedEntry) {
+        self.feed.push(entry);
+        if self.active {
+            self.render("", 0);
         }
-        let (_, height) = terminal::size().unwrap_or((80, 24));
-        self.apply_scroll_region(height);
-        self.draw_box("", 0, model);
-        self.park_in_feed(height);
     }
 
-    fn scroll_bottom(height: u16) -> u16 {
-        height.saturating_sub(3).max(1)
+    pub fn clear_feed(&mut self) {
+        self.feed.clear();
+        if self.active {
+            self.render("", 0);
+        }
     }
 
-    fn apply_scroll_region(&self, height: u16) {
-        let bottom = Self::scroll_bottom(height);
-        let mut out = io::stdout().lock();
-        let _ = write!(out, "\x1b[1;{bottom}r");
-        let _ = out.flush();
+    pub fn redraw(&mut self, model: &str) {
+        self.model = model.to_string();
+        if self.active {
+            self.render("", 0);
+        }
     }
 
-    fn park_in_feed(&self, height: u16) {
-        let bottom = Self::scroll_bottom(height);
-        let mut out = io::stdout().lock();
-        let _ = execute!(out, MoveTo(0, bottom.saturating_sub(1)));
-    }
-
-    fn draw_box(&self, input: &str, cursor: usize, model: &str) {
+    fn render(&mut self, input: &str, cursor: usize) {
         let (width, height) = terminal::size().unwrap_or((80, 24));
+        let viewport = height.saturating_sub(3).max(1);
+        let _ = self.feed.render_into(width, viewport);
+        self.draw_box(input, cursor, width, height);
+    }
+
+    fn draw_box(&self, input: &str, cursor: usize, width: u16, height: u16) {
         let box_width = usize::from(width).saturating_sub(1).max(20);
         let inner_width = box_width.saturating_sub(4).max(1);
         let utf8 = is_utf8_locale();
@@ -403,15 +894,15 @@ impl PromptDock {
             ("+-", "-+", "+-", "-+", "-", "|", ">")
         };
 
-        let top_label = if model.is_empty() {
+        let top_label = if self.model.is_empty() {
             "prompt".to_string()
         } else {
-            format!("prompt · {model}")
+            format!("prompt · {}", self.model)
         };
         let hint = if utf8 {
-            "Enter send · ↑↓ history · Ctrl-U clear · Ctrl-D quit"
+            "Enter send · click tool to expand · ↑↓ hist · PgUp/Dn scroll · Ctrl-D quit"
         } else {
-            "Enter send · Up/Dn history · Ctrl-U clear · Ctrl-D quit"
+            "Enter send · click tool · Up/Dn hist · PgUp/Dn scroll · Ctrl-D quit"
         };
 
         let edit_width = inner_width.saturating_sub(2).max(1);
@@ -453,6 +944,7 @@ impl PromptDock {
     }
 
     pub fn read_line(&mut self, model: &str) -> Option<String> {
+        self.model = model.to_string();
         if !self.active {
             prompt();
             let mut line = String::new();
@@ -463,43 +955,59 @@ impl PromptDock {
             return Some(line);
         }
 
-        struct RawGuard;
-        impl Drop for RawGuard {
+        struct InputGuard;
+        impl Drop for InputGuard {
             fn drop(&mut self) {
+                let mut out = io::stdout().lock();
+                let _ = execute!(out, DisableMouseCapture);
                 let _ = terminal::disable_raw_mode();
             }
         }
 
         if terminal::enable_raw_mode().is_err() {
-            prompt();
-            let mut line = String::new();
-            if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-                println!();
-                return None;
-            }
-            return Some(line);
+            return None;
         }
-        let _raw = RawGuard;
+        {
+            let mut out = io::stdout().lock();
+            let _ = execute!(out, EnableMouseCapture);
+        }
+        let _guard = InputGuard;
 
         let mut chars: Vec<char> = Vec::new();
         let mut cursor = 0usize;
         let mut hist_idx: Option<usize> = None;
         let mut draft = String::new();
 
-        let (_, height) = terminal::size().unwrap_or((80, 24));
-        self.apply_scroll_region(height);
-        self.draw_box("", 0, model);
-
         loop {
             let input: String = chars.iter().collect();
-            self.draw_box(&input, cursor, model);
+            self.render(&input, cursor);
 
             let Ok(ev) = event::read() else {
                 return None;
             };
             match ev {
-                Event::Resize(_, h) => {
-                    self.apply_scroll_region(h);
+                Event::Resize(_, _) => {}
+                Event::Mouse(mouse) => {
+                    let (_, height) = terminal::size().unwrap_or((80, 24));
+                    let viewport = height.saturating_sub(3).max(1);
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if mouse.row < viewport {
+                                self.feed.toggle_at_row(mouse.row);
+                            }
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.feed.scroll_up(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            let content_w = usize::from(terminal::size().unwrap_or((80, 24)).0)
+                                .saturating_sub(1)
+                                .max(10);
+                            let total = self.feed.build_lines(content_w, is_utf8_locale()).len();
+                            self.feed.scroll_down(3, total, usize::from(viewport));
+                        }
+                        _ => {}
+                    }
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -512,6 +1020,9 @@ impl PromptDock {
                                 chars.clear();
                                 cursor = 0;
                             }
+                            KeyCode::Char('o') => {
+                                self.feed.toggle_last_tool();
+                            }
                             _ => {}
                         }
                         continue;
@@ -519,28 +1030,41 @@ impl PromptDock {
                     match key.code {
                         KeyCode::Enter => {
                             let submitted: String = chars.iter().collect();
-                            drop(_raw);
-                            let (_, h) = terminal::size().unwrap_or((80, 24));
-                            self.park_in_feed(h);
                             let trimmed = submitted.trim();
                             if !trimmed.is_empty() {
-                                let glyph = if is_utf8_locale() { "›" } else { ">" };
-                                println!(
-                                    "\n{}you {} {}{}{}{}",
-                                    cyan(),
-                                    glyph,
-                                    reset(),
-                                    bold(),
-                                    sanitize(trimmed),
-                                    reset()
-                                );
+                                if !trimmed.starts_with('/') {
+                                    self.feed.push(FeedEntry::User {
+                                        text: trimmed.to_string(),
+                                        expanded: false,
+                                    });
+                                }
                                 if self.history.last().map(String::as_str) != Some(trimmed) {
                                     self.history.push(trimmed.to_string());
                                 }
                             }
-                            self.draw_box("", 0, model);
-                            self.park_in_feed(h);
+                            drop(_guard);
+                            self.render("", 0);
+                            let (_, height) = terminal::size().unwrap_or((80, 24));
+                            let mut out = io::stdout().lock();
+                            let _ = execute!(out, MoveTo(0, height.saturating_sub(3)));
                             return Some(submitted);
+                        }
+                        KeyCode::PageUp => {
+                            let (_, height) = terminal::size().unwrap_or((80, 24));
+                            let vp = usize::from(height.saturating_sub(3).max(1));
+                            self.feed.scroll_up(vp.max(1));
+                        }
+                        KeyCode::PageDown => {
+                            let (w, height) = terminal::size().unwrap_or((80, 24));
+                            let vp = usize::from(height.saturating_sub(3).max(1));
+                            let total = self
+                                .feed
+                                .build_lines(
+                                    usize::from(w).saturating_sub(1).max(10),
+                                    is_utf8_locale(),
+                                )
+                                .len();
+                            self.feed.scroll_down(vp.max(1), total, vp);
                         }
                         KeyCode::Backspace => {
                             if cursor > 0 {
@@ -606,12 +1130,10 @@ impl Default for PromptDock {
 impl Drop for PromptDock {
     fn drop(&mut self) {
         if self.active {
-            let (_, height) = terminal::size().unwrap_or((80, 24));
+            set_feed_quiet(false);
             let mut out = io::stdout().lock();
-            let _ = write!(out, "\x1b[r");
-            let _ = execute!(out, MoveTo(0, height.saturating_sub(1)));
-            let _ = writeln!(out);
-            let _ = out.flush();
+            let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
+            let _ = terminal::disable_raw_mode();
         }
     }
 }
@@ -1694,5 +2216,31 @@ mod tests {
             tool_preview_arg("bash", &bash_args).and_then(Value::as_str),
             Some("cargo test")
         );
+    }
+
+    #[test]
+    fn feed_view_toggles_tool_and_scrolls() {
+        let mut view = FeedView::new();
+        view.push(FeedEntry::Tool {
+            name: "read".to_string(),
+            preview: "src/ui.rs".to_string(),
+            args_detail: "path: src/ui.rs".to_string(),
+            result: "line1\nline2\nline3".to_string(),
+            elapsed: Duration::from_millis(5),
+            is_error: false,
+            expanded: false,
+        });
+        let collapsed = view.build_lines(80, true);
+        assert_eq!(collapsed.len(), 1);
+        assert!(collapsed[0].text.contains("read src/ui.rs"));
+
+        assert!(view.entries[0].toggle());
+        let expanded = view.build_lines(80, true);
+        assert!(expanded.len() > 3);
+
+        view.scroll_up(2);
+        assert!(!view.follow_tail);
+        view.scroll_down(10, expanded.len(), 3);
+        assert!(view.follow_tail);
     }
 }

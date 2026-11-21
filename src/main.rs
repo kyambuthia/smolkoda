@@ -206,7 +206,14 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
     let mut dock = ui::PromptDock::new();
     {
         let settings = looper.router.primary();
-        ui::banner(&settings.model, &settings.name, &config::endpoint(settings));
+        if dock.is_active() {
+            dock.push(ui::FeedEntry::Banner {
+                model: settings.model.clone(),
+                provider: settings.name.clone(),
+            });
+        } else {
+            ui::banner(&settings.model, &settings.name, &config::endpoint(settings));
+        }
         dock.redraw(&settings.model);
     }
 
@@ -224,11 +231,26 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
         }
         if line == "/clear" {
             looper.clear();
-            ui::info("Conversation cleared.");
+            if dock.is_active() {
+                dock.clear_feed();
+                dock.push(ui::FeedEntry::Info {
+                    text: "Conversation cleared.".to_string(),
+                    is_error: false,
+                });
+            } else {
+                ui::info("Conversation cleared.");
+            }
             continue;
         }
         if line == "/help" || line == "/?" {
-            print_help();
+            if dock.is_active() {
+                dock.push(ui::FeedEntry::Info {
+                    text: help_text(),
+                    is_error: false,
+                });
+            } else {
+                print_help();
+            }
             continue;
         }
         if line == "/config" {
@@ -348,15 +370,36 @@ fn repl(looper: &mut Looper, config: &mut Config, path: &Path) {
             continue;
         }
         if line == "/cost" {
-            print_cost(&looper.router);
+            if dock.is_active() {
+                dock.push(ui::FeedEntry::Info {
+                    text: cost_text(&looper.router),
+                    is_error: false,
+                });
+            } else {
+                print_cost(&looper.router);
+            }
             continue;
         }
         if line.starts_with('/') {
-            ui::warn("Unknown command. Try /help.");
+            if dock.is_active() {
+                dock.push(ui::FeedEntry::Info {
+                    text: "Unknown command. Try /help.".to_string(),
+                    is_error: true,
+                });
+            } else {
+                ui::warn("Unknown command. Try /help.");
+            }
             continue;
         }
-        if let Err(err) = looper.run_turn(line) {
-            ui::error(&err);
+        if let Err(err) = looper.run_turn_with_dock(line, dock.is_active().then_some(&mut dock)) {
+            if dock.is_active() {
+                dock.push(ui::FeedEntry::Info {
+                    text: format!("error: {err}"),
+                    is_error: true,
+                });
+            } else {
+                ui::error(&err);
+            }
         }
     }
 }
@@ -511,6 +554,56 @@ fn print_feed(feed: &Feed) {
     for (role, preview, age) in timeline {
         println!("  {:>9}  {:>4}s  {}", role, age, preview);
     }
+}
+
+fn cost_text(router: &Router) -> String {
+    let route = router.primary();
+    let usage = router.usage();
+    let mut lines = vec![
+        format!("  provider: {}", route.name),
+        format!("  model:    {}", route.model),
+        format!(
+            "  tokens:   {} in / {} out",
+            usage.input_tokens, usage.output_tokens
+        ),
+    ];
+    if usage.has_reported_cost {
+        lines.push(format!(
+            "  cost:     {}",
+            router::format_usd(usage.reported_cost_usd)
+        ));
+        return lines.join("\n");
+    }
+    if let Ok(models) = router.available_models() {
+        if let Some(pricing) = models
+            .into_iter()
+            .find(|model| model.id == route.model)
+            .and_then(|model| model.pricing)
+        {
+            lines.push(format!("  rate:     {}", pricing.format_label()));
+            let estimated = pricing.estimate_cost(usage.input_tokens, usage.output_tokens);
+            lines.push(format!("  cost:     ~{}", router::format_usd(estimated)));
+            return lines.join("\n");
+        }
+    }
+    lines.push("  cost:     unavailable (provider did not report pricing)".to_string());
+    lines.join("\n")
+}
+
+fn help_text() -> String {
+    [
+        "Commands",
+        "  /provider [name]  open provider picker or switch",
+        "  /model [name]     choose a model or set its ID",
+        "  /cost             show session token usage and cost",
+        "  /config           show active route",
+        "  /feed, /timeline  show the feed timeline",
+        "  /tools            list tools",
+        "  /voice [seconds]  record a prompt and speak the reply",
+        "  /clear            clear conversation",
+        "  /quit             quit",
+    ]
+    .join("\n")
 }
 
 fn print_cost(router: &Router) {

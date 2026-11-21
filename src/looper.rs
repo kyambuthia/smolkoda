@@ -26,11 +26,28 @@ impl Looper {
 
     /// Run one user turn. The feed is committed only if the turn succeeds.
     pub fn run_turn(&mut self, input: &str) -> Result<(), String> {
-        self.run_turn_with_output(input).map(|_| ())
+        self.run_turn_with_dock(input, None).map(|_| ())
+    }
+
+    /// Run one user turn, pushing entries into `dock` when running in TUI mode.
+    pub fn run_turn_with_dock(
+        &mut self,
+        input: &str,
+        dock: Option<&mut ui::PromptDock>,
+    ) -> Result<String, String> {
+        self.run_turn_inner(input, dock)
     }
 
     /// Run one user turn and return the final assistant text for voice playback.
     pub fn run_turn_with_output(&mut self, input: &str) -> Result<String, String> {
+        self.run_turn_inner(input, None)
+    }
+
+    fn run_turn_inner(
+        &mut self,
+        input: &str,
+        mut dock: Option<&mut ui::PromptDock>,
+    ) -> Result<String, String> {
         let start_usage = self.router.usage();
         let mut working = self.feed.clone();
         working.push_user(input);
@@ -41,10 +58,16 @@ impl Looper {
                 self.router.complete(&working, &system, None)
             })?;
             if blocks.is_empty() {
-                ui::print_text("(empty response)");
+                if let Some(d) = dock.as_deref_mut() {
+                    d.push(ui::FeedEntry::Assistant {
+                        text: "(empty response)".to_string(),
+                    });
+                } else {
+                    ui::print_text("(empty response)");
+                }
                 working.push_assistant(vec![Block::Text("(empty response)".to_string())]);
                 self.feed = working;
-                self.print_usage_delta(start_usage);
+                self.print_usage_delta(start_usage, dock);
                 return Ok(String::new());
             }
             working.push_assistant(blocks.clone());
@@ -54,7 +77,11 @@ impl Looper {
             for block in &blocks {
                 match block {
                     Block::Text(text) => {
-                        ui::print_text(text);
+                        if let Some(d) = dock.as_deref_mut() {
+                            d.push(ui::FeedEntry::Assistant { text: text.clone() });
+                        } else {
+                            ui::print_text(text);
+                        }
                         step_text.push(text.as_str());
                     }
                     Block::ToolUse {
@@ -63,21 +90,48 @@ impl Looper {
                         input,
                         parse_error,
                     } => {
-                        ui::print_tool(name, input);
+                        if dock.is_none() {
+                            ui::print_tool(name, input);
+                        }
                         let started = Instant::now();
-                        let result = match parse_error {
-                            Some(err) => format!("error: {err}"),
+                        let (result, is_error) = match parse_error {
+                            Some(err) => (format!("error: {err}"), true),
                             None => {
                                 let label = format!("running {name}");
                                 match ui::busy(ui::AnimKind::Tool, &label, || {
                                     tools::run(name, input)
                                 }) {
-                                    Ok(output) => output,
-                                    Err(err) => format!("error: {err}"),
+                                    Ok(output) => {
+                                        let err_flag = output.starts_with("error:");
+                                        (output, err_flag)
+                                    }
+                                    Err(err) => (format!("error: {err}"), true),
                                 }
                             }
                         };
-                        ui::print_result(&result, started.elapsed());
+                        let elapsed = started.elapsed();
+                        if let Some(d) = dock.as_deref_mut() {
+                            let preview = ui::tool_preview_arg(name, input)
+                                .map(|v| {
+                                    v.as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| v.to_string())
+                                })
+                                .unwrap_or_default();
+                            let args_detail =
+                                serde_json::to_string_pretty(input).unwrap_or_default();
+                            d.push(ui::FeedEntry::Tool {
+                                name: name.clone(),
+                                preview,
+                                args_detail,
+                                result: result.clone(),
+                                elapsed,
+                                is_error,
+                                expanded: is_error,
+                            });
+                        } else {
+                            ui::print_result(&result, elapsed);
+                        }
                         results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content: result,
@@ -88,7 +142,7 @@ impl Looper {
 
             if results.is_empty() {
                 self.feed = working;
-                self.print_usage_delta(start_usage);
+                self.print_usage_delta(start_usage, dock);
                 return Ok(step_text.join("\n"));
             }
             working.push_tool_results(results);
@@ -102,7 +156,11 @@ impl Looper {
 }
 
 impl Looper {
-    fn print_usage_delta(&self, start: crate::router::SessionUsage) {
+    fn print_usage_delta(
+        &self,
+        start: crate::router::SessionUsage,
+        dock: Option<&mut ui::PromptDock>,
+    ) {
         let end = self.router.usage();
         let turn_in = end.input_tokens.saturating_sub(start.input_tokens);
         let turn_out = end.output_tokens.saturating_sub(start.output_tokens);
@@ -112,7 +170,18 @@ impl Looper {
             None
         };
         let session_cost = end.has_reported_cost.then_some(end.reported_cost_usd);
-        ui::print_turn_usage(turn_in, turn_out, turn_cost, session_cost);
+        if let Some(d) = dock {
+            if turn_in > 0 || turn_out > 0 {
+                d.push(ui::FeedEntry::TurnMeta {
+                    input_tokens: turn_in,
+                    output_tokens: turn_out,
+                    turn_cost,
+                    session_cost,
+                });
+            }
+        } else {
+            ui::print_turn_usage(turn_in, turn_out, turn_cost, session_cost);
+        }
     }
 }
 
